@@ -11,6 +11,7 @@ def sim(
         zeeman_angular_freq: float,  # ω_eZ
         drive_angular_freq: float,  # ω_MW
         rabi_angular_freq: float,  # ω_1
+        frame_rotation_angular_freq: float = 0.0,  # ω_R
         t_final: float = 5.0,
         steps: int = 2_000,
 ) -> None:
@@ -20,6 +21,9 @@ def sim(
     if t_final <= 0.0:
         raise ValueError("t_final must be > 0")
 
+    relative_drive_freq = drive_angular_freq - frame_rotation_angular_freq
+    relative_zeeman_freq = zeeman_angular_freq - frame_rotation_angular_freq
+
     # Spin-1/2 operators (ħ=1 ⇒ S = σ/2)
     sx = 0.5 * qt.sigmax()
     sy = 0.5 * qt.sigmay()
@@ -27,19 +31,19 @@ def sim(
 
     # Resonant when drive freq == zeeman freq
     # rabi freq << zeeman freq
-    # H_Z = ω_eZ * S_z
-    # H_ESR = ω_1(cos(ω_MW * t)*s_x - sin(ω_MW * t)*s_y)
+    # H_Z = (ω_eZ - ω_R) * S_z
+    # H_ESR = ω_1(cos((ω_MW - ω_R) * t)*s_x + sin((ω_MW - ω_R) * t)*s_y)
     # H_total = H_Z + H_ESR
-    #         = (ω_eZ * S_z) + ω_1(cos(ω_MW * t)*s_x - sin(ω_MW * t)*s_y)
+    #         = ((ω_eZ - ω_R) * S_z) + ω_1(cos((ω_MW - ω_R) * t)*s_x + sin((ω_MW - ω_R) * t)*s_y)
 
-    zeeman_hamiltonian = zeeman_angular_freq * sz
+    zeeman_hamiltonian = relative_zeeman_freq * sz
 
     # Time-dependent drive coefficients
     def esr_coeff_x(t: float) -> float:
-        return rabi_angular_freq * np.cos(drive_angular_freq * t)
+        return rabi_angular_freq * np.cos(relative_drive_freq * t)
 
     def esr_coeff_y(t: float) -> float:
-        return -rabi_angular_freq * np.sin(drive_angular_freq * t)
+        return rabi_angular_freq * np.sin(relative_drive_freq * t)
 
     total_hamiltonian = [zeeman_hamiltonian, [sx, esr_coeff_x], [sy, esr_coeff_y]]
 
@@ -73,14 +77,18 @@ def plot_spin_components(t: np.ndarray, obs: dict[str, np.ndarray], title: str) 
 
 if __name__ == "__main__":
     # ---------------- Parameters (ħ = 1;) ----------------
-    zeeman_angular_freq = 2 * np.pi * 1  # Zeeman/Larmor ω_eZ
-    rabi_angular_freq = 2 * np.pi * 20  # drive amplitude (Rabi rate) ω_1
-    detuning = 2 * np.pi * .1  # Δ = ω_MW - ω_eZ
+    zeeman_freq = 20.0
+    rabi_freq = 1.0
+    detuning = 1.0
+
+    zeeman_angular_freq = 2 * np.pi * zeeman_freq  # Zeeman/Larmor ω_eZ
+    rabi_angular_freq = 2 * np.pi * rabi_freq  # drive amplitude (Rabi rate) ω_1
+    detuning = 2 * np.pi * detuning  # Δ = ω_MW - ω_eZ
 
     t_final = 2
     steps = 10000
 
-    # ---------------- Resonant (Δ = 0) ----------------
+    # ---------------- Resonant, Lab Frame ----------------
     t_res, obs_res = sim(
         zeeman_angular_freq=zeeman_angular_freq,
         drive_angular_freq=zeeman_angular_freq,  # Δ = 0 ⇒ ω_MW = ω_eZ
@@ -88,9 +96,9 @@ if __name__ == "__main__":
         t_final=t_final,
         steps=steps,
     )
-    plot_spin_components(t_res, obs_res, "Spin expectations (Δ = 0)")
+    plot_spin_components(t_res, obs_res, "Lab Frame, Resonant")
 
-    # ---------------- Off-resonant (Δ ≠ 0) ----------------
+    # ---------------- Detuned, Lab Frame  ----------------
     t_det, obs_det = sim(
         zeeman_angular_freq=zeeman_angular_freq,
         drive_angular_freq=zeeman_angular_freq + detuning,  # ω_MW = ω_eZ + Δ
@@ -98,6 +106,29 @@ if __name__ == "__main__":
         t_final=t_final,
         steps=steps,
     )
-    plot_spin_components(t_det, obs_det, "Spin expectations (Δ ≠ 0)")
+    plot_spin_components(t_det, obs_det, "Lab Frame, Detuned")
+
+    # ---------------- Resonant, Rotating Frame ----------------
+    t_res, obs_res = sim(
+        zeeman_angular_freq=zeeman_angular_freq,
+        drive_angular_freq=zeeman_angular_freq,  # Δ = 0 ⇒ ω_MW = ω_eZ
+        rabi_angular_freq=rabi_angular_freq,
+        frame_rotation_angular_freq=zeeman_angular_freq,
+        t_final=t_final,
+        steps=steps,
+    )
+    plot_spin_components(t_res, obs_res, "Rotating Frame, Resonant")
+
+    # ---------------- Detuned, Rotating Frame  ----------------
+    drive_angular_freq = zeeman_angular_freq + detuning
+    t_det, obs_det = sim(
+        zeeman_angular_freq=zeeman_angular_freq,
+        drive_angular_freq=drive_angular_freq,  # ω_MW = ω_eZ + Δ
+        frame_rotation_angular_freq=drive_angular_freq,
+        rabi_angular_freq=rabi_angular_freq,
+        t_final=t_final,
+        steps=steps,
+    )
+    plot_spin_components(t_det, obs_det, "Rotating Frame, Detuned")
 
     plt.show()
