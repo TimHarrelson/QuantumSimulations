@@ -7,7 +7,7 @@ import qutip as qt
 import matplotlib.pyplot as plt
 
 
-def sim(
+def simulate(
         zeeman_angular_freq: float,  # ω_eZ
         drive_angular_freq: float,  # ω_MW
         rabi_angular_freq: float,  # ω_1
@@ -89,7 +89,7 @@ if __name__ == "__main__":
     steps = 10000
 
     # ---------------- Resonant, Lab Frame ----------------
-    t_res, obs_res = sim(
+    t_res, obs_res = simulate(
         zeeman_angular_freq=zeeman_angular_freq,
         drive_angular_freq=zeeman_angular_freq,  # Δ = 0 ⇒ ω_MW = ω_eZ
         rabi_angular_freq=rabi_angular_freq,
@@ -99,7 +99,7 @@ if __name__ == "__main__":
     plot_spin_components(t_res, obs_res, "Lab Frame, Resonant")
 
     # ---------------- Detuned, Lab Frame  ----------------
-    t_det, obs_det = sim(
+    t_det, obs_det = simulate(
         zeeman_angular_freq=zeeman_angular_freq,
         drive_angular_freq=zeeman_angular_freq + detuning,  # ω_MW = ω_eZ + Δ
         rabi_angular_freq=rabi_angular_freq,
@@ -109,7 +109,7 @@ if __name__ == "__main__":
     plot_spin_components(t_det, obs_det, "Lab Frame, Detuned")
 
     # ---------------- Resonant, Rotating Frame ----------------
-    t_res, obs_res = sim(
+    t_res, obs_res = simulate(
         zeeman_angular_freq=zeeman_angular_freq,
         drive_angular_freq=zeeman_angular_freq,  # Δ = 0 ⇒ ω_MW = ω_eZ
         rabi_angular_freq=rabi_angular_freq,
@@ -121,7 +121,7 @@ if __name__ == "__main__":
 
     # ---------------- Detuned, Rotating Frame  ----------------
     drive_angular_freq = zeeman_angular_freq + detuning
-    t_det, obs_det = sim(
+    t_det, obs_det = simulate(
         zeeman_angular_freq=zeeman_angular_freq,
         drive_angular_freq=drive_angular_freq,  # ω_MW = ω_eZ + Δ
         frame_rotation_angular_freq=drive_angular_freq,
