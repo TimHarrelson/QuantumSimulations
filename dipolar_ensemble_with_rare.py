@@ -193,7 +193,7 @@ class DipolarRareParams:
     # Dipolar coupling scale (in angular frequency units).
     dipolar_scale: float = 2 * np.pi
 
-    # Shell geometry scale factor a in shell_positions_with_rare_center().
+    # Shell geometry scale factor "a" in shell_positions_with_rare_center().
     shell_scale: float = 0.282393
 
     # Time grid for evolution
@@ -209,9 +209,6 @@ class DipolarRareParams:
     init_x_sign: int = -1
     # rare: currently prepared as an |+x> eigenstate of Jx (see initial_state_rare)
     init_rare_level: int = 3
-
-    # Random seed for any stochastic elements (NumPy RNG, if used).
-    seed: int = 0
 
 
 def get_derived_frequencies(params: DipolarRareParams) -> Dict[str, float]:
@@ -302,18 +299,11 @@ def build_hamiltonian_rare(params: DipolarRareParams) -> Tuple[qt.Qobj, Dict[str
 
       - Secular dipolar couplings:
           * sea-sea (homonuclear):
-
-                H_dip^(AA) = Σ_{i<j} b_ij
-                    [ I_{iz} I_{jz}
-                      - (1/8) ( I_i^+ I_j^+ + I_i^- I_j^- ) ]
-
-            which, in Cartesian components, is:
-
                 H_dip^(AA) = Σ_{i<j} b_ij
                     [ I_{iz} I_{jz}
                       - (1/4) ( I_{ix} I_{jx} - I_{iy} I_{jy} ) ].
 
-          * sea-rare (heteronuclear Ising, no flip-flops):
+          * sea-rare (heteronuclear):
 
                 H_dip^(AR) = Σ_i b_{iR} I_{iz} J_{zR}.
     """
@@ -409,8 +399,8 @@ def build_hamiltonian_rare(params: DipolarRareParams) -> Tuple[qt.Qobj, Dict[str
     obs = {
         "Ix_sea": Ix_tot_sea,
         "Iy_sea": Iy_tot_sea,
-        "Iz_sea": Iz_tot_sea,   # abundant-bath longitudinal magnetization
-        "Iz_R": Iz_R,           # rare spin longitudinal magnetization
+        "Iz_sea": Iz_tot_sea,
+        "Iz_R": Iz_R,
         "Ix_R": Ix_R,
         "Iy_R": Iy_R,
     }
@@ -438,21 +428,12 @@ def initial_state_rare(params: DipolarRareParams) -> qt.Qobj:
 
       - sea spins: all in |±x> eigenstate (sign set by init_x_sign)
       - rare spin: currently prepared in an |+x> eigenstate of Jx
-
-    (If you prefer to use a bare |m> basis level, you can restore the
-     commented-out code and choose init_rare_level accordingly.)
     """
     n_sea = params.n_sea
     dims = dims_with_rare(n_sea)
     dim_rare = dims[-1]
 
     sea_ket = basis_x_sea(params.init_x_sign)
-
-    # If you prefer a bare |m> initial state, uncomment this block:
-    # rare_level = int(params.init_rare_level)
-    # if not (0 <= rare_level < dim_rare):
-    #     raise ValueError(f"init_rare_level must be in [0, {dim_rare-1}]")
-    # rare_ket = qt.basis(dim_rare, rare_level)
 
     rare_ket = basis_x_rare(sign=+1)
 
@@ -466,17 +447,9 @@ def simulate_rare(params: DipolarRareParams) -> Tuple[np.ndarray, Dict[str, np.n
       - ⟨Ix_sea⟩, ⟨Iy_sea⟩, ⟨Iz_sea⟩ : bath magnetization components
       - ⟨Iz_R⟩                       : rare spin longitudinal magnetization
       - ⟨Ix_R⟩, ⟨Iy_R⟩               : rare spin transverse (x,y) magnetization
-
-    The NumPy RNG is seeded with params.seed at the start of this function.
-    QuTiP's sesolve itself is deterministic (no internal randomness), so
-    this ensures that any stochastic elements you add that rely on NumPy
-    will be reproducible across runs with the same params.
     """
     if params.steps < 2 or params.t_final <= 0.0:
         raise ValueError("Bad time grid: steps >= 2 and t_final > 0.")
-
-    # Ensure any NumPy-based randomness is reproducible.
-    np.random.seed(params.seed)
 
     H, eops = build_hamiltonian_rare(params)
     psi0 = initial_state_rare(params)
@@ -505,150 +478,3 @@ def simulate_rare(params: DipolarRareParams) -> Tuple[np.ndarray, Dict[str, np.n
         "Iy_R":   np.real(res.expect[5]),
     }
     return t, out
-
-
-# ---------------------------------------------------------------------------
-# Small plotting helpers (unchanged)
-# ---------------------------------------------------------------------------
-
-def annotate_freqs(ax: plt.Axes, info: Mapping[str, float]) -> None:
-    """
-    Annotate an Axes with frequency information (in Hz) stored in `info`.
-
-    Expected keys (all optional, linear frequencies):
-      - f_Az, f_Rz:      Zeeman frequencies for sea / rare
-      - f_rf_sea, f_rfR: RF carrier frequencies
-      - f1_sea, f1_rare: RF (Rabi) frequencies for sea / rare
-      - delta_sea_Hz, delta_rare_Hz: detunings
-    """
-    parts = []
-    if "f_Az" in info:
-        parts.append(fr"$f_{{A,z}}$={info['f_Az']:.3g} Hz")
-    if "f_Rz" in info:
-        parts.append(fr"$f_{{R,z}}$={info['f_Rz']:.3g} Hz")
-    if "f_rf_sea" in info:
-        parts.append(fr"$f_{{\\mathrm{{RF}},A}}$={info['f_rf_sea']:.3g} Hz")
-    if "f_rf_rare" in info:
-        parts.append(fr"$f_{{\\mathrm{{RF}},R}}$={info['f_rf_rare']:.3g} Hz")
-    if "f1_sea" in info:
-        parts.append(fr"$f_1^A$={info['f1_sea']:.3g} Hz")
-    if "f1_rare" in info:
-        parts.append(fr"$f_1^R$={info['f1_rare']:.3g} Hz")
-    if "delta_sea_Hz" in info:
-        parts.append(fr"$\Delta_A$={info['delta_sea_Hz']:.3g} Hz")
-    if "delta_rare_Hz" in info:
-        parts.append(fr"$\Delta_R$={info['delta_rare_Hz']:.3g} Hz")
-    if parts:
-        ax.text(
-            0.98,
-            0.02,
-            ", ".join(parts),
-            transform=ax.transAxes,
-            ha="right",
-            va="bottom",
-            fontsize=9,
-            bbox=dict(boxstyle="round", alpha=0.15, lw=0.0),
-        )
-
-
-def plot_totals_rare(
-    t: np.ndarray,
-    obs: Mapping[str, np.ndarray],
-    title: str,
-    info: Mapping[str, float],
-) -> None:
-    """Quick helper to plot total sea + rare observables."""
-    fig, ax = plt.subplots()
-    ax.plot(t, obs["Ix_sea"], label="⟨Ix_sea⟩")
-    ax.plot(t, obs["Iy_sea"], label="⟨Iy_sea⟩")
-    ax.plot(t, obs["Iz_sea"], label="⟨Iz_sea⟩")
-    ax.plot(t, obs["Iz_R"],   label="⟨Iz_R⟩")
-    ax.plot(t, obs["Ix_R"],   label="⟨Ix_R⟩")
-    ax.plot(t, obs["Iy_R"],   label="⟨Iy_R⟩")
-    ax.set_xlabel("t")
-    ax.set_ylabel("Expectation value")
-    ax.set_title(title)
-    ax.legend()
-    annotate_freqs(ax, info)
-    fig.tight_layout()
-
-
-# ---------------------------------------------------------------------------
-# Example demo (unchanged logic)
-# ---------------------------------------------------------------------------
-
-# if __name__ == "__main__":
-#     # --- Choose gyromagnetic ratios (arbitrary, but consistent) ---
-#     # These values are such that γ_rare / γ_sea ≈ 1.571,
-#     # matching the ratio 1100 Hz / 700 Hz used below.
-#     gamma_sea = 4.2
-#     gamma_rare = 6.6
-#
-#     # Target linear frequencies in Hz for readability.
-#     f_Az = 700.0        # abundant (sea) Larmor frequency in Hz
-#     f_Rz = 1_100.0      # rare Larmor frequency in Hz (implied by same B0)
-#     f1A = 100.0         # sea RF (Rabi) frequency in Hz
-#     f1R = 50.0          # rare RF (Rabi) frequency in Hz
-#
-#     # Common static field B0 chosen so that
-#     #   ω_Az = γ_sea · B0 = 2π f_Az,
-#     #   ω_Rz = γ_rare · B0 = 2π f_Rz.
-#     B0_common = 2 * np.pi * f_Az / gamma_sea  # in "field units" (internal)
-#
-#     # RF drive (Rabi) amplitudes: choose B1 such that ω1 = γ · B1 = 2π f1.
-#     B1_sea = 2 * np.pi * f1A / gamma_sea
-#     B1_rare = 2 * np.pi * f1R / gamma_rare
-#
-#     # RF carrier linear frequencies (Hz).
-#     # Example: sea drive slightly detuned above its Larmor; rare on resonance.
-#     f_rf_sea = f_Az + 100.0
-#     f_rf_rare = f_Rz
-#     omega_rf_sea = 2 * np.pi * f_rf_sea
-#     omega_rf_rare = 2 * np.pi * f_rf_rare
-#
-#     # Construct parameter set.
-#     params = DipolarRareParams(
-#         n_sea=12,
-#         gamma_sea=gamma_sea,
-#         gamma_rare=gamma_rare,
-#         B0_sea=B0_common,
-#         B0_rare=B0_common,          # both species see the same static field
-#         B1_sea=B1_sea,
-#         B1_rare=B1_rare,
-#         omega_rf_sea=omega_rf_sea,
-#         omega_rf_rare=omega_rf_rare,
-#         phi_sea=0.0,
-#         phi_rare=0.0,
-#         dipolar_scale=2 * np.pi,    # overall dipolar scale
-#         shell_scale=0.282393,
-#         t_final=1.0,
-#         steps=2_000,
-#         drive_sea=True,
-#         drive_rare=False,           # turn on if you want rare drive as well
-#         init_x_sign=-1,
-#         init_rare_level=3,
-#         seed=0,
-#     )
-#
-#     t, obs = simulate_rare(params)
-#
-#     # Frequencies to annotate (in Hz), drawn from the helper.
-#     freqs = get_derived_frequencies(params)
-#     info = {
-#         "f_Az": freqs["f_Az"],
-#         "f_Rz": freqs["f_Rz"],
-#         "f_rf_sea": freqs["f_rf_sea"],
-#         "f_rf_rare": freqs["f_rf_rare"],
-#         "f1_sea": freqs["f1_sea"],
-#         "f1_rare": freqs["f1_rare"],
-#         "delta_sea_Hz": freqs["delta_sea_Hz"],
-#         "delta_rare_Hz": freqs["delta_rare_Hz"],
-#     }
-#
-#     plot_totals_rare(
-#         t,
-#         obs,
-#         "Sea (I = 1/2) + rare (I = 3/2) with γ- and B-derived frequencies",
-#         info=info,
-#     )
-#     plt.show()
