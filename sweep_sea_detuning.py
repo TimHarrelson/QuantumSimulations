@@ -14,10 +14,6 @@ For each detuning:
           envelope of ⟨I^z_sea⟩ (to visualize the pseudo T1).
       (c) ⟨I^x_sea⟩ and ⟨I^y_sea⟩ vs time (rare OFF only).
 
-All plots:
-  - Do NOT show rare-spin observables.
-  - Do NOT use dotted linestyles (":"), only solid or dashed.
-
 A PDF report is generated with:
   - Global parameter summary.
   - T-fit summary table.
@@ -27,8 +23,8 @@ This version uses:
   - Physical gyromagnetic ratios for Ga (effective 69/71 mix) and 27Al.
   - B0 = 3 T.
   - Rabi frequencies f1A = 20 kHz (sea), f1R = 10 kHz (rare).
-  - Dipolar scale dipolar_scale = (μ0 / 4π) * ħ with shell_scale ≈ 0.3 nm,
-    giving nearest-neighbor dipolar couplings of O(10^2 Hz).
+  - Dipolar scale dipolar_scale = (μ0 / 4π) * ħ with shell_scale ≈ 0.4 nm,
+    giving nearest-neighbor dipolar couplings of ≈ 75 Hz.
   - Time window t_final = 3e-2 s, steps = 2000 (good envelope view).
   - Detuning sweep δ_A ∈ [-10 kHz, 10 kHz].
 """
