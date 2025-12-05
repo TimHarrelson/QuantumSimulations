@@ -130,7 +130,7 @@ def run_sweep_sea_detuning(
     *,
     f_Az: float,
     f1A: float,
-    f1R: float,
+    target_sea_detuning: float,
     gamma_sea: float,
     gamma_rare: float,
     sea_detunings_Hz: Sequence[float],
@@ -138,8 +138,12 @@ def run_sweep_sea_detuning(
     steps: int = 2000,
     phi_sea: float = 0.0,
     phi_rare: float = 0.0,
-    base_seed: int = 0,
     out_root: str = "results",
+    is_spin_three_half = False,
+    solver_atol: float | None = None,
+    solver_rtol: float | None = None,
+    solver_nsteps: int | None = None,
+    solver_max_step: float | None = None,
 ) -> str:
     """
     Run a sweep over sea detunings δ_A = f_Az - f_rf,A.
@@ -150,8 +154,9 @@ def run_sweep_sea_detuning(
         Sea Larmor frequency (Hz).
     f1A : float
         Sea Rabi frequency f1A (Hz).
-    f1R : float
-        Rare Rabi frequency f1R (Hz).
+    target_sea_detuning : float
+        The sea detuning (Hz) used to calculate the rare Rabi frequency (f1R) such that it will satisfy
+         the resonance condition the model assumes.
     gamma_sea : float
         Sea gyromagnetic ratio (rad·s^-1·T^-1).
     gamma_rare : float
@@ -164,16 +169,17 @@ def run_sweep_sea_detuning(
         Number of time steps at which expectations are recorded.
     phi_sea, phi_rare : float
         RF phases for sea and rare drives (radians).
-    base_seed : int
-        Base random seed. Each detuning uses base_seed + index.
     out_root : str
         Root directory where result folders will be created.
+    is_spin_three_half : bool
+        Whether the rare spin is J = 3/2 or I = 1/2
 
     Returns
     -------
     base_dir : str
         Path to the directory containing this sweep's results.
     """
+    f1R = f1R_for_resonance(f1A, target_sea_detuning, 0)
     sea_detunings_Hz = np.asarray(sea_detunings_Hz, dtype=float)
     n_det = len(sea_detunings_Hz)
 
@@ -227,17 +233,25 @@ def run_sweep_sea_detuning(
         "phi_sea_rad": float(phi_sea),
         "phi_rare_rad": float(phi_rare),
         "sea_detunings_Hz": [float(x) for x in sea_detunings_Hz],
+        "sea_spin_type": "1/2",
+        "rare_spin_type": "3/2" if is_spin_three_half else "1/2",
+        "solver_atol": solver_atol,
+        "solver_rtol": solver_rtol,
+        "solver_nsteps": solver_nsteps,
+        "solver_max_step": solver_max_step,
+        "target_sea_detuning": target_sea_detuning,
     }
 
     print("------------------------------------------------------------")
     print("Starting sea detuning sweep (Ga sea, Al rare)")
-    print(f"  Output directory : {base_dir}")
-    print(f"  Number of points : {n_det}")
-    print(f"  f_Az (Ga Larmor) : {f_Az/1e6:.3f} MHz")
-    print(f"  f_Rz (Al Larmor) : {f_Rz/1e6:.3f} MHz")
-    print(f"  f1A (sea Rabi)   : {f1A/1e3:.3f} kHz")
-    print(f"  f1R (rare Rabi)  : {f1R/1e3:.3f} kHz")
-    print(f"  B0 (common)      : {B0_common:.3f} T")
+    print(f"  Output directory    : {base_dir}")
+    print(f"  Number of points    : {n_det}")
+    print(f"  f_Az (Ga Larmor)    : {f_Az/1e6:.3f} MHz")
+    print(f"  f_Rz (Al Larmor)    : {f_Rz/1e6:.3f} MHz")
+    print(f"  Target sea detuning : {target_sea_detuning/1e6:.3f} MHz")
+    print(f"  f1A (sea Rabi)      : {f1A/1e3:.3f} kHz")
+    print(f"  f1R (rare Rabi)     : {f1R/1e3:.3f} kHz")
+    print(f"  B0 (common)         : {B0_common:.3f} T")
     print("  Detunings δ_A (Hz):")
     print("   ", ", ".join(f"{d:+.1f}" for d in sea_detunings_Hz))
     print("------------------------------------------------------------", flush=True)
@@ -259,6 +273,7 @@ def run_sweep_sea_detuning(
         lines.append(f"  f_Rz (rare Larmor)    = {f_Rz/1e6:.3f} MHz")
         lines.append(f"  f1A (sea Rabi)        = {f1A/1e3:.3f} kHz")
         lines.append(f"  f1R (rare Rabi)       = {f1R/1e3:.3f} kHz")
+        lines.append(f"  Target sea detuning   = {target_sea_detuning / 1e3:.3f} kHz")
         lines.append(f"  gamma_sea             = {gamma_sea:.3e} rad·s⁻¹·T⁻¹")
         lines.append(f"  gamma_rare            = {gamma_rare:.3e} rad·s⁻¹·T⁻¹")
         lines.append(f"  B0_common             = {B0_common:.3f} T")
@@ -271,6 +286,13 @@ def run_sweep_sea_detuning(
         lines.append(f"  n_sea                 = 12")
         lines.append(f"  phi_sea               = {phi_sea:.3f} rad")
         lines.append(f"  phi_rare              = {phi_rare:.3f} rad")
+        lines.append(f"  sea_spin_type         = 1/2")
+        lines.append(f"  rare_spin_type        = {"3/2" if is_spin_three_half else "1/2"}")
+        lines.append("")
+        lines.append(f"  solver_atol           = {solver_atol}")
+        lines.append(f"  solver_rtol           = {solver_rtol}")
+        lines.append(f"  solver_nsteps         = {solver_nsteps}")
+        lines.append(f"  solver_max_step       = {solver_max_step}")
         lines.append("")
         lines.append("Sea detunings (δ_A = f_Az - f_rf,A) in Hz:")
         lines.append("  " + ", ".join(f"{d:+.1f}" for d in sea_detunings_Hz))
@@ -301,8 +323,6 @@ def run_sweep_sea_detuning(
             f_rf_rare = f_Rz
             omega_rf_rare = 2 * np.pi * f_rf_rare
 
-            seed = base_seed + idx
-
             base_params = DipolarRareParams(
                 n_sea=12,
                 gamma_sea=gamma_sea,
@@ -323,12 +343,16 @@ def run_sweep_sea_detuning(
                 drive_rare=False,   # toggled below
                 init_x_sign=-1,
                 init_rare_level=3,
-                seed=seed,
+                is_spin_three_half=is_spin_three_half,
+                solver_atol=solver_atol,
+                solver_rtol=solver_rtol,
+                solver_nsteps=solver_nsteps,
+                solver_max_step=solver_max_step,
             )
 
             # Rare drive OFF and ON
             params_off = replace(base_params, drive_rare=False)
-            params_on = replace(base_params, drive_rare=True, seed=seed)
+            params_on = replace(base_params, drive_rare=True)
 
             # Run simulations
             t_off, obs_off = simulate_rare(params_off)
@@ -482,6 +506,25 @@ def run_sweep_sea_detuning(
             pdf.savefig(fig3)
             plt.close(fig3)
 
+            # ------------------------------------------------------------------
+            # Plot 4: State norm ‖ψ(t)‖ (rare OFF vs ON)
+            # ------------------------------------------------------------------
+            figN, axN = plt.subplots()
+            axN.plot(t_off, obs_off["state_norm"],
+                     label=r"$\|\psi(t)\|$, rare OFF")
+            axN.plot(t_on, obs_on["state_norm"],
+                     label=r"$\|\psi(t)\|$, rare ON")
+
+            axN.set_xlabel("Time (s)")
+            axN.set_ylabel(r"State norm $\|\psi\|$")
+            axN.set_title(f"δ_A = {delta_Hz:+.1f} Hz (state norm)")
+            axN.legend()
+            figN.tight_layout()
+            figN_path = os.path.join(det_dir, "state_norm_off_on.png")
+            figN.savefig(figN_path, dpi=300)
+            pdf.savefig(figN)
+            plt.close(figN)
+
             print(
                 f"[{idx + 1}/{n_det}] Finished δ_A = {delta_Hz:+.1f} Hz, "
                 f"results in {det_dir}",
@@ -537,17 +580,45 @@ def run_sweep_sea_detuning(
     return base_dir
 
 
+def f1R_for_resonance(f1A_Hz: float,
+                      deltaA_Hz: float,
+                      deltaR_Hz: float = 0.0) -> float:
+    """
+    Compute f1R (Hz) such that the sea and rare effective fields match:
+
+        sqrt(deltaA_Hz**2 + f1A_Hz**2) = sqrt(deltaR_Hz**2 + f1R_Hz**2)
+
+    Parameters
+    ----------
+    f1A_Hz : float
+        Sea Rabi frequency in Hz.
+    deltaA_Hz : float
+        Target sea detuning (δ_A) in Hz where you want the match.
+    deltaR_Hz : float, optional
+        Rare detuning (δ_R) in Hz. Default is 0 (rare on resonance).
+
+    Returns
+    -------
+    float
+        Required rare Rabi frequency f1R in Hz.
+    """
+    lhs_sq = deltaA_Hz**2 + f1A_Hz**2
+    rhs_sq = lhs_sq - deltaR_Hz**2
+    return rhs_sq**0.5
+
+
 # ---------------------------------------------------------------------------
 # Main entry point with Ga/Al physical parameters
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     # --- Ga (sea) & Al (rare) gyromagnetic ratios (rad/s/T) ---
-    gamma69 = 6.4389e7    # 69Ga
+    # See https://www.kherb.io/docs/nmr_table.html for gyromagnetic ratio sources and abundances
+    # gamma69 = 6.4389e7    # 69Ga
     gamma71 = 8.1812e7    # 71Ga
-    p69, p71 = 0.60108, 0.39892  # natural abundances (approx)
+    # p69, p71 = 0.60108, 0.39892  # natural abundances (approx)
 
-    gamma_sea = p69 * gamma69 + p71 * gamma71   # effective Ga, ~7.13e7
+    gamma_sea = gamma71  # p69 * gamma69 + p71 * gamma71   # effective Ga, ~7.13e7
     gamma_rare = 6.976e7                        # 27Al
 
     # --- Static field ---
@@ -557,27 +628,25 @@ if __name__ == "__main__":
     f_Az = gamma_sea * B0_common / (2 * np.pi)
 
     # --- Rabi frequencies (Hz) ---
-    f1A = 20e3   # 20 kHz sea Rabi
-    f1R = 10e3   # 10 kHz rare Rabi
+    f1A = 50000   # sea Rabi
+    target_sea_detuning = 50000
+    # rare Rabi freq determined to make it match resonance condition with target sea detuning
 
     # --- Time grid (extended to see the envelope clearly) ---
-    t_final = 3.0e-2   # 300 ms
-    steps = 2000
+    t_final = .3 # in seconds
+    steps = 20000
 
     # --- RF phases ---
-    phi_sea = 0.0
-    phi_rare = 0.0
-
-    # --- Random seed base ---
-    base_seed = 0
+    phi_sea = (np.pi / 2.0) * 1.0
+    phi_rare = (np.pi / 2.0) * 1.0
 
     # --- Detuning sweep (δ_A in Hz): -10 kHz ... +10 kHz ---
-    sea_detunings_Hz = np.linspace(-10e3, 10e3, 5)
+    sea_detunings_Hz = np.linspace(49000, 61000, 9)
 
     run_sweep_sea_detuning(
         f_Az=f_Az,
         f1A=f1A,
-        f1R=f1R,
+        target_sea_detuning=target_sea_detuning,
         gamma_sea=gamma_sea,
         gamma_rare=gamma_rare,
         sea_detunings_Hz=sea_detunings_Hz,
@@ -585,6 +654,10 @@ if __name__ == "__main__":
         steps=steps,
         phi_sea=phi_sea,
         phi_rare=phi_rare,
-        base_seed=base_seed,
         out_root="results",
+        is_spin_three_half=False,
+        solver_atol=1e-10,
+        solver_rtol=1e-9,
+        solver_nsteps=10_000_000,
+        solver_max_step=1e-5,
     )

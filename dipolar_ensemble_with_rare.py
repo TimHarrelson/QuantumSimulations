@@ -10,28 +10,28 @@ import matplotlib.pyplot as plt
 
 
 # ---------------------------------------------------------------------------
-# Local operators for sea (I = 1/2) and rare (I = 3/2)
+# Local operators for sea (I = 1/2) and rare (J = 3/2) or (I = 1/2)
 # ---------------------------------------------------------------------------
 
-# Sea spins: spin-1/2
-_Ix_sea = 0.5 * qt.sigmax()
-_Iy_sea = 0.5 * qt.sigmay()
-_Iz_sea = 0.5 * qt.sigmaz()
-_I_sea = qt.qeye(2)
+# Spin-1/2
+_Ix = 0.5 * qt.sigmax()
+_Iy = 0.5 * qt.sigmay()
+_Iz = 0.5 * qt.sigmaz()
+_I = qt.qeye(2)
 
-# Rare spin: spin-3/2 (4-dimensional local Hilbert space)
-_Jx_rare = qt.jmat(1.5, "x")  # 4x4
-_Jy_rare = qt.jmat(1.5, "y")
-_Jz_rare = qt.jmat(1.5, "z")
-_J_rare = qt.qeye(4)
+# Spin-3/2
+_Jx = qt.jmat(1.5, "x")  # 4x4
+_Jy = qt.jmat(1.5, "y")
+_Jz = qt.jmat(1.5, "z")
+_J = qt.qeye(4)
 
 
-def dims_with_rare(n_sea: int) -> list[int]:
+def dims_with_rare(n_sea: int, is_spin_three_half: bool = False) -> list[int]:
     """
     Local dimensions for n_sea sea spins and one rare spin.
     Indices: 0..n_sea-1 are sea (dim=2), index n_sea is rare (dim=4).
     """
-    return [2] * n_sea + [4]
+    return [2] * n_sea + ([4] if is_spin_three_half else [2])
 
 
 def embed_site_op_hetero(local_op: qt.Qobj, site: int, dims: list[int]) -> qt.Qobj:
@@ -51,16 +51,54 @@ def total_op_sea(local_op: qt.Qobj, n_sea: int, dims: list[int]) -> qt.Qobj:
     """
     return sum(embed_site_op_hetero(local_op, j, dims) for j in range(n_sea))
 
+def basis_sea(axis: str = "x", sign: int = +1) -> qt.Qobj:
+    """
+    Single-spin basis state for a sea spin (I = 1/2).
 
-def basis_x_sea(sign: int = +1) -> qt.Qobj:
+    axis ∈ {"x", "z"}
+        "x": |±x⟩ eigenstate of I_x
+        "z": |↑⟩ (sign ≥ 0) or |↓⟩ (sign < 0) eigenstate of I_z
+
+    sign = +1 → "upper" eigenstate (largest eigenvalue)
+    sign = -1 → "lower" eigenstate (smallest eigenvalue)
     """
-    |±x> eigenstates of Ix for a spin-1/2.
-    sign = +1 → +1/2 eigenstate of Ix
-    sign = -1 → -1/2 eigenstate of Ix
+    axis = axis.lower()
+    if axis == "x":
+        up, dn = qt.basis(2, 0), qt.basis(2, 1)
+        ket = (up + sign * dn).unit()
+        return ket
+    elif axis == "z":
+        # I_z eigenstates are just |↑⟩ and |↓⟩ in the computational basis
+        idx = 0 if sign >= 0 else 1
+        return qt.basis(2, idx)
+    else:
+        raise ValueError("axis must be 'x' or 'z' for basis_sea()")
+
+
+def basis_rare(axis: str = "x", sign: int = +1, is_spin_three_half = False) -> qt.Qobj:
     """
-    up, dn = qt.basis(2, 0), qt.basis(2, 1)
-    ket = (up + sign * dn).unit()
-    return ket
+    Single-spin basis state for the rare spin (I = 3/2).
+
+    axis ∈ {"x", "z"}
+        "x": |±⟩ eigenstate of J_x (max / min eigenvalue)
+        "z": |m = +3/2⟩ (sign ≥ 0) or |m = -3/2⟩ (sign < 0) eigenstate of J_z
+
+    sign = +1 → "upper" eigenstate (largest eigenvalue)
+    sign = -1 → "lower" eigenstate (smallest eigenvalue)
+
+    isSpinThreeHalf = True → use J (3/2) rather than I (1/2) for the basis state.
+    isSpinThreeHalf = True → use I (1/2) rather than J (3/2) for the basis state.
+    """
+    axis = axis.lower()
+    if axis == "x":
+        evals, evecs = _Jx.eigenstates() if is_spin_three_half else _Ix.eigenstates()
+    elif axis == "z":
+        evals, evecs = _Jz.eigenstates() if is_spin_three_half else _Iz.eigenstates()
+    else:
+        raise ValueError("axis must be 'x' or 'z' for basis_rare()")
+
+    idx = int(np.argmax(evals) if sign >= 0 else np.argmin(evals))
+    return evecs[idx]
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +248,14 @@ class DipolarRareParams:
     # rare: currently prepared as an |+x> eigenstate of Jx (see initial_state_rare)
     init_rare_level: int = 3
 
+    is_spin_three_half: bool = True
+
+    # Solver settings
+    solver_atol: float | None = None
+    solver_rtol: float | None = None
+    solver_nsteps: int | None = None
+    solver_max_step: float | None = None
+
 
 def get_derived_frequencies(params: DipolarRareParams) -> Dict[str, float]:
     """
@@ -282,7 +328,7 @@ def build_hamiltonian_rare(params: DipolarRareParams) -> Tuple[qt.Qobj, Dict[str
     Construct the rotating-frame Hamiltonian for:
 
         - n_sea spins of I = 1/2
-        - 1 rare spin of I = 3/2 (last index)
+        - 1 rare spin of J = 3/2 or I = 3/2 (last index)
 
     The Hamiltonian includes:
       - Zeeman detunings in the rotating frames (sea + rare), but only for
@@ -313,7 +359,7 @@ def build_hamiltonian_rare(params: DipolarRareParams) -> Tuple[qt.Qobj, Dict[str
     n_sea = params.n_sea
     n_total = n_sea + 1
     idx_rare = n_sea
-    dims = dims_with_rare(n_sea)
+    dims = dims_with_rare(n_sea, params.is_spin_three_half)
 
     # ---- Derived frequencies and detunings ----
     freqs = get_derived_frequencies(params)
@@ -322,29 +368,33 @@ def build_hamiltonian_rare(params: DipolarRareParams) -> Tuple[qt.Qobj, Dict[str
     delta_sea = freqs["delta_sea"]
     delta_rare = freqs["delta_rare"]
 
+    rare_operator_z = _Jz if params.is_spin_three_half else _Iz
+    rare_operator_y = _Jy if params.is_spin_three_half else _Iy
+    rare_operator_x = _Jx if params.is_spin_three_half else _Ix
+
     # ---- Zeeman detunings in the rotating frames ----
     H_detune = 0
     if params.drive_sea and delta_sea != 0.0:
         # All sea spins share the same Δ_A.
-        Iz_tot_sea = total_op_sea(_Iz_sea, n_sea, dims)
+        Iz_tot_sea = total_op_sea(_Iz, n_sea, dims)
         H_detune += delta_sea * Iz_tot_sea
 
     if params.drive_rare and delta_rare != 0.0:
-        Iz_R = embed_site_op_hetero(_Jz_rare, idx_rare, dims)
+        Iz_R = embed_site_op_hetero(rare_operator_z, idx_rare, dims)
         H_detune += delta_rare * Iz_R
 
     # ---- RF drive terms (static in this rotating frame) ----
     if params.drive_sea and omega1_sea != 0.0:
         H_drive_sea = omega1_sea * (
-            np.cos(params.phi_sea) * total_op_sea(_Ix_sea, n_sea, dims)
-            + np.sin(params.phi_sea) * total_op_sea(_Iy_sea, n_sea, dims)
+            np.cos(params.phi_sea) * total_op_sea(_Ix, n_sea, dims)
+            + np.sin(params.phi_sea) * total_op_sea(_Iy, n_sea, dims)
         )
     else:
         H_drive_sea = 0
 
     if params.drive_rare and omega1_rare != 0.0:
-        Ix_R = embed_site_op_hetero(_Jx_rare, idx_rare, dims)
-        Iy_R = embed_site_op_hetero(_Jy_rare, idx_rare, dims)
+        Ix_R = embed_site_op_hetero(rare_operator_x, idx_rare, dims)
+        Iy_R = embed_site_op_hetero(rare_operator_y, idx_rare, dims)
         H_drive_rare = omega1_rare * (
             np.cos(params.phi_rare) * Ix_R + np.sin(params.phi_rare) * Iy_R
         )
@@ -368,12 +418,12 @@ def build_hamiltonian_rare(params: DipolarRareParams) -> Tuple[qt.Qobj, Dict[str
     for i, j in combinations(range(n_total), 2):
         if i < n_sea and j < n_sea:
             # sea-sea couplings: homonuclear secular dipolar
-            Iz_i = embed_site_op_hetero(_Iz_sea, i, dims)
-            Iz_j = embed_site_op_hetero(_Iz_sea, j, dims)
-            Ix_i = embed_site_op_hetero(_Ix_sea, i, dims)
-            Ix_j = embed_site_op_hetero(_Ix_sea, j, dims)
-            Iy_i = embed_site_op_hetero(_Iy_sea, i, dims)
-            Iy_j = embed_site_op_hetero(_Iy_sea, j, dims)
+            Iz_i = embed_site_op_hetero(_Iz, i, dims)
+            Iz_j = embed_site_op_hetero(_Iz, j, dims)
+            Ix_i = embed_site_op_hetero(_Ix, i, dims)
+            Ix_j = embed_site_op_hetero(_Ix, j, dims)
+            Iy_i = embed_site_op_hetero(_Iy, i, dims)
+            Iy_j = embed_site_op_hetero(_Iy, j, dims)
 
             H_dipolar += b[i, j] * (
                 Iz_i * Iz_j - (0.25 * (Ix_i * Ix_j - Iy_i * Iy_j))
@@ -382,19 +432,19 @@ def build_hamiltonian_rare(params: DipolarRareParams) -> Tuple[qt.Qobj, Dict[str
             # sea-rare (Ising only: Izi · JzR)
             if i == idx_rare or j == idx_rare:
                 sea_idx = i if j == idx_rare else j
-                Iz_i = embed_site_op_hetero(_Iz_sea, sea_idx, dims)
-                Iz_R = embed_site_op_hetero(_Jz_rare, idx_rare, dims)
+                Iz_i = embed_site_op_hetero(_Iz, sea_idx, dims)
+                Iz_R = embed_site_op_hetero(rare_operator_z, idx_rare, dims)
                 H_dipolar += b[i, j] * (Iz_i * Iz_R)
 
     H_total = qt.Qobj(H_detune + H_drive_sea + H_drive_rare + H_dipolar)
 
     # ---- Observables ----
-    Ix_tot_sea = total_op_sea(_Ix_sea, n_sea, dims)
-    Iy_tot_sea = total_op_sea(_Iy_sea, n_sea, dims)
-    Iz_tot_sea = total_op_sea(_Iz_sea, n_sea, dims)
-    Iz_R = embed_site_op_hetero(_Jz_rare, idx_rare, dims)
-    Ix_R = embed_site_op_hetero(_Jx_rare, idx_rare, dims)
-    Iy_R = embed_site_op_hetero(_Jy_rare, idx_rare, dims)
+    Ix_tot_sea = total_op_sea(_Ix, n_sea, dims)
+    Iy_tot_sea = total_op_sea(_Iy, n_sea, dims)
+    Iz_tot_sea = total_op_sea(_Iz, n_sea, dims)
+    Iz_R = embed_site_op_hetero(rare_operator_z, idx_rare, dims)
+    Ix_R = embed_site_op_hetero(rare_operator_x, idx_rare, dims)
+    Iy_R = embed_site_op_hetero(rare_operator_y, idx_rare, dims)
 
     obs = {
         "Ix_sea": Ix_tot_sea,
@@ -407,21 +457,6 @@ def build_hamiltonian_rare(params: DipolarRareParams) -> Tuple[qt.Qobj, Dict[str
     return H_total, obs
 
 
-def basis_x_rare(sign: int = +1) -> qt.Qobj:
-    """
-    |±x> eigenstates of Jx for a spin-3/2.
-
-    sign = +1 → eigenstate with largest +Jx eigenvalue  (≈ |m = +3/2>_x)
-    sign = -1 → eigenstate with most negative Jx eigenvalue (≈ |m = -3/2>_x)
-    """
-    evals, evecs = _Jx_rare.eigenstates()
-    if sign >= 0:
-        idx = int(np.argmax(evals))   # +3/2 eigenstate of Jx
-    else:
-        idx = int(np.argmin(evals))   # -3/2 eigenstate of Jx
-    return evecs[idx]
-
-
 def initial_state_rare(params: DipolarRareParams) -> qt.Qobj:
     """
     Product state for sea + rare:
@@ -430,12 +465,12 @@ def initial_state_rare(params: DipolarRareParams) -> qt.Qobj:
       - rare spin: currently prepared in an |+x> eigenstate of Jx
     """
     n_sea = params.n_sea
-    dims = dims_with_rare(n_sea)
+    dims = dims_with_rare(n_sea, params.is_spin_three_half)
     dim_rare = dims[-1]
 
-    sea_ket = basis_x_sea(params.init_x_sign)
+    sea_ket = basis_sea(axis="z", sign=params.init_x_sign)
 
-    rare_ket = basis_x_rare(sign=+1)
+    rare_ket = basis_rare(axis="z", sign=-params.init_x_sign, is_spin_three_half=params.is_spin_three_half)
 
     return qt.tensor([sea_ket] * n_sea + [rare_ket])
 
@@ -447,6 +482,7 @@ def simulate_rare(params: DipolarRareParams) -> Tuple[np.ndarray, Dict[str, np.n
       - ⟨Ix_sea⟩, ⟨Iy_sea⟩, ⟨Iz_sea⟩ : bath magnetization components
       - ⟨Iz_R⟩                       : rare spin longitudinal magnetization
       - ⟨Ix_R⟩, ⟨Iy_R⟩               : rare spin transverse (x,y) magnetization
+      - state_norm                   : ‖ψ(t)‖ at each time point (should stay ≈ 1)
     """
     if params.steps < 2 or params.t_final <= 0.0:
         raise ValueError("Bad time grid: steps >= 2 and t_final > 0.")
@@ -455,6 +491,32 @@ def simulate_rare(params: DipolarRareParams) -> Tuple[np.ndarray, Dict[str, np.n
     psi0 = initial_state_rare(params)
 
     t = np.linspace(0.0, params.t_final, params.steps)
+
+    # Build QuTiP Options object only if any override is provided
+    options = None
+    if any(
+            v is not None
+            for v in (
+                    getattr(params, "solver_atol", None),
+                    getattr(params, "solver_rtol", None),
+                    getattr(params, "solver_nsteps", None),
+                    getattr(params, "solver_max_step", None),
+            )
+    ):
+        options = {}
+
+        options["store_states"] = True
+        options["store_final_state"] = True
+
+        if getattr(params, "solver_atol", None) is not None:
+            options["atol"] = params.solver_atol
+        if getattr(params, "solver_rtol", None) is not None:
+            options["rtol"] = params.solver_rtol
+        if getattr(params, "solver_nsteps", None) is not None:
+            options["nsteps"] = params.solver_nsteps
+        if getattr(params, "solver_max_step", None) is not None:
+            options["max_step"] = params.solver_max_step
+
     res = qt.sesolve(
         H,
         psi0,
@@ -467,7 +529,11 @@ def simulate_rare(params: DipolarRareParams) -> Tuple[np.ndarray, Dict[str, np.n
             eops["Ix_R"],
             eops["Iy_R"],
         ],
+        options=options,
     )
+
+    # State norms as an extra diagnostic observable
+    norms = np.array([psi.norm() for psi in res.states])
 
     out = {
         "Ix_sea": np.real(res.expect[0]),
@@ -476,5 +542,6 @@ def simulate_rare(params: DipolarRareParams) -> Tuple[np.ndarray, Dict[str, np.n
         "Iz_R":   np.real(res.expect[3]),
         "Ix_R":   np.real(res.expect[4]),
         "Iy_R":   np.real(res.expect[5]),
+        "state_norm": norms,
     }
     return t, out
