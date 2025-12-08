@@ -1,4 +1,3 @@
-# sweep_sea_detuning.py
 """
 Sweep the sea detuning δ_A = f_Az - f_rf,A for a Ga (sea) / Al (rare) system.
 
@@ -34,6 +33,7 @@ import datetime as _dt
 import json
 import os
 from typing import Any, Dict, List, Optional, Sequence
+import time
 
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
@@ -43,6 +43,8 @@ from dipolar_ensemble_with_rare import (
     DipolarRareParams,
     get_derived_frequencies,
     simulate_rare,
+    shell_positions_with_rare_center,
+    dipolar_couplings_from_positions,
 )
 
 
@@ -134,6 +136,7 @@ def run_sweep_sea_detuning(
     gamma_sea: float,
     gamma_rare: float,
     sea_detunings_Hz: Sequence[float],
+    n_sea: int = 12,
     t_final: float = 3.0e-2,
     steps: int = 2000,
     phi_sea: float = 0.0,
@@ -201,7 +204,61 @@ def run_sweep_sea_detuning(
     mu0_over_4pi = 1.0e-7             # N / A^2
     hbar = 1.054571817e-34            # J·s
     dipolar_scale_SI = mu0_over_4pi * hbar  # ~1.05e-41 in SI units
-    shell_scale = 0.3e-9              # meters; ~0.3 nm characteristic length
+    shell_scale = 0.282393e-9    # meters; ~0.3 nm characteristic length
+
+    # -------- One-shot computation of b_ij couplings for this geometry --------
+    positions = shell_positions_with_rare_center(n_sea=n_sea, radius=shell_scale)
+    n_total = n_sea + 1
+    idx_rare = n_sea
+
+    b = dipolar_couplings_from_positions(
+        positions=positions,
+        scale=dipolar_scale_SI,
+        gamma_sea=gamma_sea,
+        gamma_rare=gamma_rare,
+    )
+
+    sea_indices = list(range(n_sea))
+
+    # Sea–rare couplings (all i-R pairs)
+    sea_rare_vals = np.array([b[i, idx_rare] for i in sea_indices], dtype=float)
+    sea_rare_abs = np.abs(sea_rare_vals) / (2 * np.pi)  # Hz
+
+    # Sea–sea couplings (all i<j pairs)
+    sea_sea_vals = []
+    for i in sea_indices:
+        for j in sea_indices:
+            if j > i:
+                sea_sea_vals.append(b[i, j])
+    sea_sea_vals = np.array(sea_sea_vals, dtype=float)
+    sea_sea_abs = np.abs(sea_sea_vals) / (2 * np.pi)  # Hz
+
+    # Optional "gamma_rare = 0" sanity check (heteronuclear part should vanish)
+    b_gamma0 = dipolar_couplings_from_positions(
+        positions=positions,
+        scale=dipolar_scale_SI,
+        gamma_sea=gamma_sea,
+        gamma_rare=0.0,
+    )
+    sea_rare_gamma0 = np.array([b_gamma0[i, idx_rare] for i in sea_indices], dtype=float)
+    max_sea_rare_gamma0_Hz = np.max(np.abs(sea_rare_gamma0)) / (2 * np.pi)
+
+    # Print a concise coupling summary to the console
+    print("Estimated dipolar couplings from geometry + physical scales:")
+    print(f"  Sea–rare b_ij (all sea ↔ rare), |b| in Hz:")
+    print(f"    avg |b_AR| ≈ {sea_rare_abs.mean():.2f} Hz")
+    print(f"    min |b_AR| ≈ {sea_rare_abs.min():.2f} Hz")
+    print(f"    max |b_AR| ≈ {sea_rare_abs.max():.2f} Hz")
+    print("  Sea–sea b_ij (all i<j), |b| in Hz:")
+    print(f"    avg |b_AA| ≈ {sea_sea_abs.mean():.2f} Hz")
+    print(f"    min |b_AA| ≈ {sea_sea_abs.min():.2f} Hz")
+    print(f"    max |b_AA| ≈ {sea_sea_abs.max():.2f} Hz")
+
+    print(
+        "  Sanity check (gamma_rare = 0): "
+        f"max |b_AR| ≈ {max_sea_rare_gamma0_Hz:.3e} Hz (should be ~0)."
+    )
+    print("------------------------------------------------------------", flush=True)
 
     # -------- Output directory & report setup --------
     timestamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -229,7 +286,7 @@ def run_sweep_sea_detuning(
         "shell_scale_m": float(shell_scale),
         "t_final_s": float(t_final),
         "steps": int(steps),
-        "n_sea": 12,
+        "n_sea": int(n_sea),
         "phi_sea_rad": float(phi_sea),
         "phi_rare_rad": float(phi_rare),
         "sea_detunings_Hz": [float(x) for x in sea_detunings_Hz],
@@ -283,7 +340,7 @@ def run_sweep_sea_detuning(
         lines.append(f"  shell_scale           = {shell_scale*1e9:.3f} nm")
         lines.append(f"  t_final               = {t_final:.3e} s")
         lines.append(f"  steps                 = {steps:d}")
-        lines.append(f"  n_sea                 = 12")
+        lines.append(f"  n_sea                 = {n_sea:d}")
         lines.append(f"  phi_sea               = {phi_sea:.3f} rad")
         lines.append(f"  phi_rare              = {phi_rare:.3f} rad")
         lines.append(f"  sea_spin_type         = 1/2")
@@ -324,7 +381,7 @@ def run_sweep_sea_detuning(
             omega_rf_rare = 2 * np.pi * f_rf_rare
 
             base_params = DipolarRareParams(
-                n_sea=12,
+                n_sea=n_sea,
                 gamma_sea=gamma_sea,
                 gamma_rare=gamma_rare,
                 B0_sea=B0_common,
@@ -355,8 +412,25 @@ def run_sweep_sea_detuning(
             params_on = replace(base_params, drive_rare=True)
 
             # Run simulations
+            t0_off = time.perf_counter()
             t_off, obs_off = simulate_rare(params_off)
+            t1_off = time.perf_counter()
+            dt_off = t1_off - t0_off
+            print(
+                f"[{idx + 1}/{n_det}] |||| Finished drive OFF in {dt_off:.2f} s",
+                flush=True,
+            )
+
+            t0_on = time.perf_counter()
             t_on, obs_on = simulate_rare(params_on)
+            t1_on = time.perf_counter()
+            dt_on = t1_on - t0_on
+            print(
+                f"[{idx + 1}/{n_det}] |||| Finished drive ON in {dt_on:.2f} s",
+                flush=True,
+            )
+
+            dt_total = dt_off + dt_on
 
             freqs_off = get_derived_frequencies(params_off)
             freqs_on = get_derived_frequencies(params_on)
@@ -527,6 +601,7 @@ def run_sweep_sea_detuning(
 
             print(
                 f"[{idx + 1}/{n_det}] Finished δ_A = {delta_Hz:+.1f} Hz, "
+                f"in {dt_total:.2f} s, "
                 f"results in {det_dir}",
                 flush=True,
             )
@@ -628,12 +703,12 @@ if __name__ == "__main__":
     f_Az = gamma_sea * B0_common / (2 * np.pi)
 
     # --- Rabi frequencies (Hz) ---
-    f1A = 50000   # sea Rabi
-    target_sea_detuning = 50000
+    f1A = 2500   # sea Rabi
+    target_sea_detuning = 1250
     # rare Rabi freq determined to make it match resonance condition with target sea detuning
 
     # --- Time grid (extended to see the envelope clearly) ---
-    t_final = .3 # in seconds
+    t_final = 30 # in seconds
     steps = 20000
 
     # --- RF phases ---
@@ -641,7 +716,7 @@ if __name__ == "__main__":
     phi_rare = (np.pi / 2.0) * 1.0
 
     # --- Detuning sweep (δ_A in Hz): -10 kHz ... +10 kHz ---
-    sea_detunings_Hz = np.linspace(49000, 61000, 9)
+    sea_detunings_Hz = np.linspace(0, 5000, 21)
 
     run_sweep_sea_detuning(
         f_Az=f_Az,
@@ -650,6 +725,7 @@ if __name__ == "__main__":
         gamma_sea=gamma_sea,
         gamma_rare=gamma_rare,
         sea_detunings_Hz=sea_detunings_Hz,
+        n_sea=6,
         t_final=t_final,
         steps=steps,
         phi_sea=phi_sea,

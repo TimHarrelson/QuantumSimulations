@@ -105,26 +105,152 @@ def basis_rare(axis: str = "x", sign: int = +1, is_spin_three_half = False) -> q
 # Shell geometry + dipolar couplings
 # ---------------------------------------------------------------------------
 
-def shell_positions_with_rare_center(a: float = 0.282393) -> np.ndarray:
+def _platonic_vertices(n_sea: int) -> np.ndarray:
     """
-    Positions for a single rare nucleus at the origin and 12 sea nuclei
-    on a symmetric shell around it:
+    Return unscaled vertex coordinates for the Platonic solid
+    with n_sea vertices, normalized to lie on the unit sphere.
 
-        S = { (±1, ±1, 0), (±1, 0, ±1), (0, ±1, ±1) } * a
-
-    Returns an array of shape (13, 3) with:
-      - first 12 rows: sea spins
-      - last row: rare spin at (0, 0, 0)
+    Supported n_sea: 4 (tetra), 6 (octa), 8 (cube), 12 (icosa), 20 (dodeca).
     """
-    shell_vectors = [
-        (+1, +1, 0), (+1, -1, 0), (-1, +1, 0), (-1, -1, 0),
-        (+1, 0, +1), (+1, 0, -1), (-1, 0, +1), (-1, 0, -1),
-        (0, +1, +1), (0, +1, -1), (0, -1, +1), (0, -1, -1),
-    ]
-    sea_positions = a * np.array(shell_vectors, dtype=float)
+    phi = (1.0 + np.sqrt(5.0)) / 2.0  # golden ratio
+    inv_phi = 1.0 / phi               # = phi - 1
+
+    if n_sea == 4:
+        # Regular tetrahedron
+        pts = np.array([
+            [ 1.0,  1.0,  1.0],
+            [-1.0, -1.0,  1.0],
+            [-1.0,  1.0, -1.0],
+            [ 1.0, -1.0, -1.0],
+        ], dtype=float)
+
+    elif n_sea == 6:
+        # Regular octahedron
+        pts = np.array([
+            [ 1.0,  0.0,  0.0],
+            [-1.0,  0.0,  0.0],
+            [ 0.0,  1.0,  0.0],
+            [ 0.0, -1.0,  0.0],
+            [ 0.0,  0.0,  1.0],
+            [ 0.0,  0.0, -1.0],
+        ], dtype=float)
+
+    elif n_sea == 8:
+        # Cube
+        pts = np.array([
+            [ 1.0,  1.0,  1.0],
+            [ 1.0,  1.0, -1.0],
+            [ 1.0, -1.0,  1.0],
+            [ 1.0, -1.0, -1.0],
+            [-1.0,  1.0,  1.0],
+            [-1.0,  1.0, -1.0],
+            [-1.0, -1.0,  1.0],
+            [-1.0, -1.0, -1.0],
+        ], dtype=float)
+
+    elif n_sea == 12:
+        # Icosahedron
+        pts = np.array([
+            [ 0.0,  1.0,  phi],
+            [ 0.0, -1.0,  phi],
+            [ 0.0,  1.0, -phi],
+            [ 0.0, -1.0, -phi],
+
+            [ 1.0,  phi,  0.0],
+            [-1.0,  phi,  0.0],
+            [ 1.0, -phi,  0.0],
+            [-1.0, -phi,  0.0],
+
+            [ phi,  0.0,  1.0],
+            [ phi,  0.0, -1.0],
+            [-phi,  0.0,  1.0],
+            [-phi,  0.0, -1.0],
+        ], dtype=float)
+
+    elif n_sea == 20:
+        # Dodecahedron: cube vertices + 12 others
+        pts = []
+
+        # (±1, ±1, ±1)
+        for x in (-1.0, 1.0):
+            for y in (-1.0, 1.0):
+                for z in (-1.0, 1.0):
+                    pts.append([x, y, z])
+
+        # (0, ±1/phi, ±phi)
+        for y in (-inv_phi, inv_phi):
+            for z in (-phi, phi):
+                pts.append([0.0, y, z])
+
+        # (±1/phi, ±phi, 0)
+        for x in (-inv_phi, inv_phi):
+            for y in (-phi, phi):
+                pts.append([x, y, 0.0])
+
+        # (±phi, 0, ±1/phi)
+        for x in (-phi, phi):
+            for z in (-inv_phi, inv_phi):
+                pts.append([x, 0.0, z])
+
+        pts = np.array(pts, dtype=float)
+
+    else:
+        raise ValueError(f"No Platonic solid with {n_sea} vertices.")
+
+    # Normalize each vertex to lie on the unit sphere
+    norms = np.linalg.norm(pts, axis=1, keepdims=True)
+    pts_unit = pts / norms
+    return pts_unit
+
+
+def shell_positions_with_rare_center(
+    n_sea: int,
+    radius: float = 0.282393,
+) -> np.ndarray:
+    """
+    Positions for `n_sea` sea nuclei on a shell around a rare nucleus at the origin.
+
+    For n_sea in {4, 6, 8, 12, 20}, use the vertices of the corresponding
+    Platonic solid (exactly symmetric on that polyhedral surface), scaled
+    to the given radius.
+
+    For all other n_sea, fall back to a Fibonacci-sphere construction that
+    gives quasi-uniform points on a spherical shell.
+
+    Returns
+    -------
+    positions : ndarray, shape (n_sea + 1, 3)
+        First n_sea rows: sea nuclei.
+        Last row: rare nucleus at the origin (0, 0, 0).
+    """
+    if n_sea < 1:
+        raise ValueError("n_sea must be at least 1.")
+
+    try:
+        # Try Platonic solid first
+        sea_unit = _platonic_vertices(n_sea)
+        sea_positions = radius * sea_unit
+    except ValueError:
+        # Fallback: Fibonacci sphere
+        sea_positions = np.zeros((n_sea, 3), dtype=float)
+        golden_ratio = (1.0 + np.sqrt(5.0)) / 2.0
+
+        for i in range(n_sea):
+            # y in [-1, 1]
+            y = 1.0 - 2.0 * (i + 0.5) / n_sea
+            r_xy = np.sqrt(max(0.0, 1.0 - y * y))
+
+            phi_angle = 2.0 * np.pi * i / golden_ratio
+
+            x = r_xy * np.cos(phi_angle)
+            z = r_xy * np.sin(phi_angle)
+
+            sea_positions[i] = radius * np.array([x, y, z], dtype=float)
+
     rare_position = np.array([[0.0, 0.0, 0.0]], dtype=float)
-    positions = np.vstack([sea_positions, rare_position])  # shape (13, 3)
+    positions = np.vstack([sea_positions, rare_position])
     return positions
+
 
 
 def dipolar_couplings_from_positions(
@@ -174,6 +300,7 @@ def dipolar_couplings_from_positions(
     return b
 
 
+
 # ---------------------------------------------------------------------------
 # Simulation core: sea (I = 1/2) + rare (I = 3/2)
 # ---------------------------------------------------------------------------
@@ -202,7 +329,7 @@ class DipolarRareParams:
     that part of H_Z is omitted).
     """
 
-    # Number of sea spins (I = 1/2). For the shell geometry this must be 12.
+    # Number of sea spins.
     n_sea: int = 12
 
     # Gyromagnetic ratios (units: rad·s^-1·(field_unit)^-1, or consistent internals)
@@ -353,9 +480,6 @@ def build_hamiltonian_rare(params: DipolarRareParams) -> Tuple[qt.Qobj, Dict[str
 
                 H_dip^(AR) = Σ_i b_{iR} I_{iz} J_{zR}.
     """
-    if params.n_sea != 12:
-        raise ValueError("For the shell geometry we require n_sea = 12.")
-
     n_sea = params.n_sea
     n_total = n_sea + 1
     idx_rare = n_sea
@@ -402,7 +526,10 @@ def build_hamiltonian_rare(params: DipolarRareParams) -> Tuple[qt.Qobj, Dict[str
         H_drive_rare = 0
 
     # ---- Dipolar couplings from shell geometry ----
-    positions = shell_positions_with_rare_center(a=params.shell_scale)
+    positions = shell_positions_with_rare_center(
+        n_sea=n_sea,
+        radius=params.shell_scale,
+    )
     if positions.shape != (n_total, 3):
         raise RuntimeError("Shell geometry returned unexpected number of sites.")
 
