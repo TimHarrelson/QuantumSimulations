@@ -370,9 +370,9 @@ class DipolarRareParams:
     drive_rare: bool = False
 
     # Initial state choices
-    # sea: all |±x> eigenstates of Ix (I = 1/2)
+    # sea: all |±x> eigenstates of Ix (sign set by init_x_sign)
     init_x_sign: int = -1
-    # rare: currently prepared as an |+x> eigenstate of Jx (see initial_state_rare)
+    # rare: currently prepared as an |+x> eigenstate of Jx
     init_rare_level: int = 3
 
     is_spin_three_half: bool = True
