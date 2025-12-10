@@ -1,31 +1,58 @@
 """
 Sweep the sea detuning δ_A = f_Az - f_rf,A for a Ga (sea) / Al (rare) system.
 
-For each detuning, run two simulations:
-  1) rare drive OFF
-  2) rare drive ON
+For each detuning, we now run THREE simulations:
+
+  Geometry A: rare at center (is_center_rare = True)
+    1) rare drive OFF
+    2) rare drive ON
+
+  Geometry B: sea-as-center control (is_center_rare = False)
+    3) sea-center control (drive_rare = OFF only)
 
 For each detuning:
-  - Save all raw data and parameters to disk.
-  - Produce three plots:
-      (a) ⟨I^z_sea⟩ vs time (rare OFF & ON).
-      (b) Same, with exponential T-like fits overlaid on a coarse-grained
-          envelope of ⟨I^z_sea⟩ (to visualize the pseudo T1).
-      (c) ⟨I^x_sea⟩ and ⟨I^y_sea⟩ vs time (rare OFF only).
+  - Save all raw data and parameters to disk as each simulation finishes.
+  - Compute window-averaged ⟨I^z_sea⟩ and define a drift "slope" metric from a
+    linear regression on the central portion of the coarse-grained envelope.
+  - For the rare-at-center geometry, define a *normalized* contrast metric
+    comparing ON vs OFF:
 
-A PDF report is generated with:
-  - Global parameter summary.
-  - T-fit summary table.
-  - All plots inserted.
+        contrast_rare_center
+            = (I_z_slope_on_center - I_z_slope_off_center)
+              / I_z_slope_off_center
 
-This version uses:
-  - Physical gyromagnetic ratios for Ga (effective 69/71 mix) and 27Al.
-  - B0 = 3 T.
-  - Rabi frequencies f1A = 20 kHz (sea), f1R = 10 kHz (rare).
-  - Dipolar scale dipolar_scale = (μ0 / 4π) * ħ with shell_scale ≈ 0.4 nm,
-    giving nearest-neighbor dipolar couplings of ≈ 75 Hz.
-  - Time window t_final = 3e-2 s, steps = 2000 (good envelope view).
-  - Detuning sweep δ_A ∈ [-10 kHz, 10 kHz].
+  - For the sea-as-center control, define a *normalized* contrast metric that
+    compares the rare-at-center ON slope to the sea-center OFF slope, using
+    the sea-center OFF slope as the normalization:
+
+        contrast_sea_center
+            = (I_z_slope_on_center - I_z_slope_off_sea_center)
+              / I_z_slope_off_sea_center
+
+  - Save all of the above to metrics.json in the detuning directory.
+  - We also track the linear-regression correlation coefficient R for each
+    slope fit:
+        R_off_center, R_on_center, R_off_sea_center.
+
+Plots for each detuning (added to a PDF report and saved as PNGs):
+
+  (1) ⟨I^z_sea⟩ vs time (rare OFF & ON, rare-at-center geometry).
+  (2) Coarse-grained (window-averaged) ⟨I^z_sea⟩ for the rare-at-center
+      geometry (OFF & ON), with slope endpoints highlighted and labelled,
+      plus contrast_rare_center and the R values for each slope.
+  (3) Coarse-grained ⟨I^z_sea⟩ for the sea-as-center control (OFF only),
+      with its slope endpoints highlighted and labelled, plus contrast_sea_center
+      and the regression R for the sea-center slope.
+  (4) State norm ‖ψ(t)‖ vs time (rare OFF & ON, rare-at-center geometry).
+
+A final PDF page summarises, for each detuning:
+
+  - I_z_slope_OFF/ON(center), contrast_rare_center, R_off/center, R_on/center
+  - I_z_slope_OFF(sea-center), contrast_sea_center, R_off(sea-center)
+
+This version removes the previous exponential “T-like” fits entirely, removes
+the detection_metric, keeps the window-averaged plots, and separates the
+control geometry into its own graph using only the OFF sea-center run.
 """
 
 from dataclasses import asdict, replace
@@ -46,50 +73,6 @@ from dipolar_ensemble_with_rare import (
     shell_positions_with_rare_center,
     dipolar_couplings_from_positions,
 )
-
-
-# ---------------------------------------------------------------------------
-# Utility: simple exponential decay fit
-# ---------------------------------------------------------------------------
-
-def fit_exponential_decay(t: np.ndarray, y: np.ndarray) -> Optional[Dict[str, float]]:
-    """
-    Fit y(t) ≈ C + A * exp(-t / T) by:
-      1) Estimate C as the mean of the last 10% of samples.
-      2) Fit ln(y - C) = ln(A) - t / T via linear least squares.
-
-    Returns dict {A, C, T} or None if fit fails (e.g. non-positive values).
-    """
-    if t.ndim != 1 or y.ndim != 1 or len(t) != len(y):
-        raise ValueError("t and y must be 1D arrays of the same length.")
-
-    n = len(t)
-    if n < 10:
-        return None
-
-    # Estimate asymptote C from the tail
-    n_tail = max(1, n // 10)
-    C = float(np.mean(y[-n_tail:]))
-
-    y_eff = y - C
-    mask = y_eff > 0.0
-    if mask.sum() < 5:
-        return None
-
-    t_fit = t[mask]
-    y_fit = y_eff[mask]
-    ln_y = np.log(y_fit)
-
-    # Linear least squares: ln_y = ln(A) - t/T
-    A_mat = np.vstack([np.ones_like(t_fit), -t_fit]).T
-    coeffs, *_ = np.linalg.lstsq(A_mat, ln_y, rcond=None)
-    lnA, invT = coeffs
-    if invT <= 0.0:
-        return None
-
-    A0 = float(np.exp(lnA))
-    T = float(1.0 / invT)
-    return {"A": A0, "C": C, "T": T}
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +108,138 @@ def coarse_grain(t: np.ndarray, y: np.ndarray, window: int = 25):
 
 
 # ---------------------------------------------------------------------------
+# Utility: slope/drift metric from coarse-grained ⟨I^z_sea⟩
+# ---------------------------------------------------------------------------
+
+def iz_slope_from_coarse(
+    t_coarse: np.ndarray,
+    iz_coarse: np.ndarray,
+) -> Dict[str, float]:
+    """
+    Compute a drift metric from a coarse-grained ⟨I^z_sea⟩ trace using
+    a linear fit to the *central* part of the envelope.
+
+    We fit a line iz ≈ a + b t over the central ~60% of points, then define:
+
+        I_z_slope = I_z_fit(t_end) - I_z_fit(t_start)
+
+    where t_start/t_end are the endpoints of the fitted interval and
+    I_z_fit is the fitted line evaluated at those times.
+
+    We also compute the Pearson correlation coefficient R for the fit
+    segment and its square R².
+
+    Returns a dict with keys:
+        - I_z_slope
+        - t_start, t_end
+        - I_z_start, I_z_end  (fitted values at these endpoints)
+        - R_value, R2_value   (correlation coefficient and its square)
+
+    If too few coarse points are available, returns NaNs.
+    """
+    n = t_coarse.size
+    if n < 4 or iz_coarse.size < 4:
+        return {
+            "I_z_slope": np.nan,
+            "t_start": np.nan,
+            "t_end": np.nan,
+            "I_z_start": np.nan,
+            "I_z_end": np.nan,
+            "R_value": np.nan,
+            "R2_value": np.nan,
+        }
+
+    # Use the central ~60% to avoid early/late transients and edge noise.
+    frac_edge = 0.2
+    i0 = int(frac_edge * n)
+    i1 = int((1.0 - frac_edge) * n)
+
+    # Clamp indices so we always have at least two points.
+    i0 = max(0, min(i0, n - 2))
+    i1 = max(i0 + 2, min(i1, n))
+
+    t_seg = t_coarse[i0:i1]
+    iz_seg = iz_coarse[i0:i1]
+
+    if t_seg.size < 2:
+        return {
+            "I_z_slope": np.nan,
+            "t_start": np.nan,
+            "t_end": np.nan,
+            "I_z_start": np.nan,
+            "I_z_end": np.nan,
+            "R_value": np.nan,
+            "R2_value": np.nan,
+        }
+
+    # Linear least-squares fit: iz ≈ a + b t
+    b, a = np.polyfit(t_seg, iz_seg, 1)
+
+    t_start = float(t_seg[0])
+    t_end = float(t_seg[-1])
+    iz_start = float(a + b * t_start)
+    iz_end = float(a + b * t_end)
+    I_z_slope = iz_end - iz_start
+
+    # Correlation coefficient R and R² on the fitted segment
+    t_mean = np.mean(t_seg)
+    iz_mean = np.mean(iz_seg)
+    t_d = t_seg - t_mean
+    iz_d = iz_seg - iz_mean
+    ss_t = float(np.sum(t_d * t_d))
+    ss_iz = float(np.sum(iz_d * iz_d))
+
+    if ss_t > 0.0 and ss_iz > 0.0:
+        R_value = float(np.dot(t_d, iz_d) / np.sqrt(ss_t * ss_iz))
+        R2_value = float(R_value * R_value)
+    else:
+        R_value = np.nan
+        R2_value = np.nan
+
+    return {
+        "I_z_slope": I_z_slope,
+        "t_start": t_start,
+        "t_end": t_end,
+        "I_z_start": iz_start,
+        "I_z_end": iz_end,
+        "R_value": R_value,
+        "R2_value": R2_value,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Utility: safe normalization helper
+# ---------------------------------------------------------------------------
+
+def _safe_normalized_difference(
+    num: float,
+    denom: float,
+) -> float:
+    """
+    Return num / denom, but guard against denom = 0.
+
+    If denom is zero (or NaN), returns NaN.
+    """
+    if denom == 0.0 or np.isnan(denom):
+        return float("nan")
+    return num / denom
+
+
+# ---------------------------------------------------------------------------
+# Utility: consistent detuning label for folder names
+# ---------------------------------------------------------------------------
+
+def detuning_label(delta_Hz: float) -> str:
+    """
+    Produce the per-detuning directory name used by this sweep, e.g.:
+
+      +1000.0 Hz -> 'delta_p1000.0Hz'
+      -1000.0 Hz -> 'delta_m1000.0Hz'
+    """
+    return f"delta_{delta_Hz:+.1f}Hz".replace("+", "p").replace("-", "m")
+
+
+# ---------------------------------------------------------------------------
 # Main sweep function
 # ---------------------------------------------------------------------------
 
@@ -142,11 +257,12 @@ def run_sweep_sea_detuning(
     phi_sea: float = 0.0,
     phi_rare: float = 0.0,
     out_root: str = "results",
-    is_spin_three_half = False,
+    is_spin_three_half: bool = False,
     solver_atol: float | None = None,
     solver_rtol: float | None = None,
     solver_nsteps: int | None = None,
     solver_max_step: float | None = None,
+    coarse_window: int = 50,
 ) -> str:
     """
     Run a sweep over sea detunings δ_A = f_Az - f_rf,A.
@@ -158,8 +274,8 @@ def run_sweep_sea_detuning(
     f1A : float
         Sea Rabi frequency f1A (Hz).
     target_sea_detuning : float
-        The sea detuning (Hz) used to calculate the rare Rabi frequency (f1R) such that it will satisfy
-         the resonance condition the model assumes.
+        The sea detuning (Hz) used to calculate the rare Rabi frequency (f1R)
+        such that it will satisfy the resonance condition the model assumes.
     gamma_sea : float
         Sea gyromagnetic ratio (rad·s^-1·T^-1).
     gamma_rare : float
@@ -175,14 +291,18 @@ def run_sweep_sea_detuning(
     out_root : str
         Root directory where result folders will be created.
     is_spin_three_half : bool
-        Whether the rare spin is J = 3/2 or I = 1/2
+        Whether the rare spin is J = 3/2 or I = 1/2.
+    coarse_window : int
+        Block size for coarse-graining the ⟨I^z_sea⟩ traces.
 
     Returns
     -------
     base_dir : str
         Path to the directory containing this sweep's results.
     """
-    f1R = f1R_for_resonance(f1A, target_sea_detuning, 0)
+    # Rare Rabi frequency from your original Hartmann–Hahn style condition
+    f1R = f1R_for_resonance(f1A, target_sea_detuning, 0.0)
+
     sea_detunings_Hz = np.asarray(sea_detunings_Hz, dtype=float)
     n_det = len(sea_detunings_Hz)
 
@@ -196,7 +316,7 @@ def run_sweep_sea_detuning(
 
     # Rabi fields B1 such that ω1 = γ * B1 = 2π f1
     B1_sea = 2 * np.pi * f1A / gamma_sea
-    B1_rare = 2 * np.pi * f1R / gamma_rare
+    B1_rare = 2 * np.pi * f1R / gamma_rare if gamma_rare != 0.0 else 0.0
 
     # -------- Physical dipolar scale and shell length scale --------
     # dipolar_scale_SI = (μ0 / 4π) * ħ, in SI units,
@@ -204,7 +324,7 @@ def run_sweep_sea_detuning(
     mu0_over_4pi = 1.0e-7             # N / A^2
     hbar = 1.054571817e-34            # J·s
     dipolar_scale_SI = mu0_over_4pi * hbar  # ~1.05e-41 in SI units
-    shell_scale = 0.282393e-9    # meters; ~0.3 nm characteristic length
+    shell_scale = 0.282393e-9         # meters; ~0.3 nm characteristic length
 
     # -------- One-shot computation of b_ij couplings for this geometry --------
     positions = shell_positions_with_rare_center(n_sea=n_sea, radius=shell_scale)
@@ -233,16 +353,6 @@ def run_sweep_sea_detuning(
     sea_sea_vals = np.array(sea_sea_vals, dtype=float)
     sea_sea_abs = np.abs(sea_sea_vals) / (2 * np.pi)  # Hz
 
-    # Optional "gamma_rare = 0" sanity check (heteronuclear part should vanish)
-    b_gamma0 = dipolar_couplings_from_positions(
-        positions=positions,
-        scale=dipolar_scale_SI,
-        gamma_sea=gamma_sea,
-        gamma_rare=0.0,
-    )
-    sea_rare_gamma0 = np.array([b_gamma0[i, idx_rare] for i in sea_indices], dtype=float)
-    max_sea_rare_gamma0_Hz = np.max(np.abs(sea_rare_gamma0)) / (2 * np.pi)
-
     # Print a concise coupling summary to the console
     print("Estimated dipolar couplings from geometry + physical scales:")
     print(f"  Sea–rare b_ij (all sea ↔ rare), |b| in Hz:")
@@ -253,11 +363,6 @@ def run_sweep_sea_detuning(
     print(f"    avg |b_AA| ≈ {sea_sea_abs.mean():.2f} Hz")
     print(f"    min |b_AA| ≈ {sea_sea_abs.min():.2f} Hz")
     print(f"    max |b_AA| ≈ {sea_sea_abs.max():.2f} Hz")
-
-    print(
-        "  Sanity check (gamma_rare = 0): "
-        f"max |b_AR| ≈ {max_sea_rare_gamma0_Hz:.3e} Hz (should be ~0)."
-    )
     print("------------------------------------------------------------", flush=True)
 
     # -------- Output directory & report setup --------
@@ -297,6 +402,7 @@ def run_sweep_sea_detuning(
         "solver_nsteps": solver_nsteps,
         "solver_max_step": solver_max_step,
         "target_sea_detuning": target_sea_detuning,
+        "coarse_window": int(coarse_window),
     }
 
     print("------------------------------------------------------------")
@@ -309,7 +415,7 @@ def run_sweep_sea_detuning(
     print(f"  f1A (sea Rabi)      : {f1A/1e3:.3f} kHz")
     print(f"  f1R (rare Rabi)     : {f1R/1e3:.3f} kHz")
     print(f"  B0 (common)         : {B0_common:.3f} T")
-    print("  Detunings δ_A (Hz):")
+    print(f"  Detunings δ_A (Hz):")
     print("   ", ", ".join(f"{d:+.1f}" for d in sea_detunings_Hz))
     print("------------------------------------------------------------", flush=True)
 
@@ -343,16 +449,23 @@ def run_sweep_sea_detuning(
         lines.append(f"  n_sea                 = {n_sea:d}")
         lines.append(f"  phi_sea               = {phi_sea:.3f} rad")
         lines.append(f"  phi_rare              = {phi_rare:.3f} rad")
-        lines.append(f"  sea_spin_type         = 1/2")
-        lines.append(f"  rare_spin_type        = {"3/2" if is_spin_three_half else "1/2"}")
+        lines.append("  sea_spin_type         = 1/2")
+        lines.append(
+            "  rare_spin_type        = " + ("3/2" if is_spin_three_half else "1/2")
+        )
         lines.append("")
         lines.append(f"  solver_atol           = {solver_atol}")
         lines.append(f"  solver_rtol           = {solver_rtol}")
         lines.append(f"  solver_nsteps         = {solver_nsteps}")
         lines.append(f"  solver_max_step       = {solver_max_step}")
         lines.append("")
+        lines.append(f"  coarse_window         = {coarse_window}")
+        lines.append("")
         lines.append("Sea detunings (δ_A = f_Az - f_rf,A) in Hz:")
-        lines.append("  " + ", ".join(f"{d:+.1f}" for d in sea_detunings_Hz))
+        det_strs = [f"{d:+.1f}" for d in sea_detunings_Hz]
+        per_line = 6
+        for i in range(0, len(det_strs), per_line):
+            lines.append("  " + ", ".join(det_strs[i : i + per_line]))
         ax.text(
             0.02,
             0.98,
@@ -366,7 +479,6 @@ def run_sweep_sea_detuning(
 
         # -------- Sweep loop --------
         for idx, delta_Hz in enumerate(sea_detunings_Hz):
-            # Progress update
             print(
                 f"[{idx + 1}/{n_det}] Running δ_A = {delta_Hz:+.1f} Hz ...",
                 flush=True,
@@ -380,6 +492,12 @@ def run_sweep_sea_detuning(
             f_rf_rare = f_Rz
             omega_rf_rare = 2 * np.pi * f_rf_rare
 
+            # Create per-detuning directory *before* running sims
+            det_label = detuning_label(delta_Hz)
+            det_dir = os.path.join(base_dir, det_label)
+            os.makedirs(det_dir, exist_ok=True)
+
+            # Base parameters (rare-at-center geometry by default)
             base_params = DipolarRareParams(
                 n_sea=n_sea,
                 gamma_sea=gamma_sea,
@@ -397,245 +515,422 @@ def run_sweep_sea_detuning(
                 t_final=t_final,
                 steps=steps,
                 drive_sea=True,
-                drive_rare=False,   # toggled below
+                drive_rare=False,   # toggled per variant
                 init_x_sign=-1,
                 init_rare_level=3,
                 is_spin_three_half=is_spin_three_half,
+                is_center_rare=True,
                 solver_atol=solver_atol,
                 solver_rtol=solver_rtol,
                 solver_nsteps=solver_nsteps,
                 solver_max_step=solver_max_step,
             )
 
-            # Rare drive OFF and ON
-            params_off = replace(base_params, drive_rare=False)
-            params_on = replace(base_params, drive_rare=True)
+            # Variant parameters
+            params_center_off = replace(base_params, drive_rare=False, is_center_rare=True)
+            params_center_on  = replace(base_params, drive_rare=True,  is_center_rare=True)
 
-            # Run simulations
-            t0_off = time.perf_counter()
-            t_off, obs_off = simulate_rare(params_off)
-            t1_off = time.perf_counter()
-            dt_off = t1_off - t0_off
-            print(
-                f"[{idx + 1}/{n_det}] |||| Finished drive OFF in {dt_off:.2f} s",
-                flush=True,
+            # Sea-as-center control geometry (drive_rare always OFF here)
+            params_sea_center_off = replace(
+                base_params,
+                drive_rare=False,
+                is_center_rare=False,
             )
 
-            t0_on = time.perf_counter()
-            t_on, obs_on = simulate_rare(params_on)
-            t1_on = time.perf_counter()
-            dt_on = t1_on - t0_on
-            print(
-                f"[{idx + 1}/{n_det}] |||| Finished drive ON in {dt_on:.2f} s",
-                flush=True,
+            # Helper to run a simulation, save immediately, and report timing
+            def run_and_save(tag: str, params: DipolarRareParams):
+                t0 = time.perf_counter()
+                t_arr, obs = simulate_rare(params)
+                t1 = time.perf_counter()
+                dt_sim = t1 - t0
+
+                npz_name = f"time_and_obs_{tag}.npz"
+                np.savez(
+                    os.path.join(det_dir, npz_name),
+                    t=t_arr,
+                    **obs,
+                )
+                _json_dump(os.path.join(det_dir, f"params_{tag}.json"), asdict(params))
+                freqs = get_derived_frequencies(params)
+                _json_dump(os.path.join(det_dir, f"freqs_{tag}.json"), freqs)
+
+                print(
+                    f"[{idx + 1}/{n_det}] |||| Finished {tag} in {dt_sim:.2f} s",
+                    flush=True,
+                )
+                return t_arr, obs, freqs
+
+            # Run the three simulations for this detuning
+            t_center_off, obs_center_off, freqs_center_off = run_and_save(
+                "center_off", params_center_off
+            )
+            t_center_on,  obs_center_on,  freqs_center_on  = run_and_save(
+                "center_on", params_center_on
+            )
+            t_sea_center_off, obs_sea_center_off, freqs_sea_center_off = run_and_save(
+                "shell_off", params_sea_center_off
             )
 
-            dt_total = dt_off + dt_on
-
-            freqs_off = get_derived_frequencies(params_off)
-            freqs_on = get_derived_frequencies(params_on)
-
-            # Create per-detuning directory
-            det_label = f"delta_{delta_Hz:+.1f}Hz".replace("+", "p").replace("-", "m")
-            det_dir = os.path.join(base_dir, det_label)
-            os.makedirs(det_dir, exist_ok=True)
-
-            # Save raw data (all observables, even if we only plot some)
-            np.savez(
-                os.path.join(det_dir, "time_and_obs_off.npz"),
-                t=t_off,
-                **obs_off,
+            # -------- Coarse-grain Iz_sea traces and compute slopes --------
+            # Rare-at-center geometry
+            t_c_off_center, Iz_c_off_center = coarse_grain(
+                t_center_off, obs_center_off["Iz_sea"], window=coarse_window
             )
-            np.savez(
-                os.path.join(det_dir, "time_and_obs_on.npz"),
-                t=t_on,
-                **obs_on,
+            t_c_on_center, Iz_c_on_center = coarse_grain(
+                t_center_on, obs_center_on["Iz_sea"], window=coarse_window
             )
 
-            # Save params and derived frequencies
-            _json_dump(os.path.join(det_dir, "params_off.json"), asdict(params_off))
-            _json_dump(os.path.join(det_dir, "params_on.json"), asdict(params_on))
-            _json_dump(os.path.join(det_dir, "freqs_off.json"), freqs_off)
-            _json_dump(os.path.join(det_dir, "freqs_on.json"), freqs_on)
+            slope_off_center = iz_slope_from_coarse(t_c_off_center, Iz_c_off_center)
+            slope_on_center  = iz_slope_from_coarse(t_c_on_center,  Iz_c_on_center)
 
-            # -------- T-like fits for Iz_sea (only) --------
-            fit_Iz_sea_off = fit_exponential_decay(t_off, obs_off["Iz_sea"])
-            fit_Iz_sea_on = fit_exponential_decay(t_on, obs_on["Iz_sea"])
+            I_z_slope_off_center = slope_off_center["I_z_slope"]
+            I_z_slope_on_center  = slope_on_center["I_z_slope"]
+            R_off_center = slope_off_center["R_value"]
+            R_on_center = slope_on_center["R_value"]
 
-            # Store these in summary
-            summary["sweep_results"].append(
-                {
-                    "delta_Hz": float(delta_Hz),
-                    "f_rf_sea_Hz": float(f_rf_sea),
-                    "fit_Iz_sea_off": fit_Iz_sea_off,
-                    "fit_Iz_sea_on": fit_Iz_sea_on,
-                }
+            # Sea-as-center control geometry (sea-center OFF only)
+            t_c_off_sea_center, Iz_c_off_sea_center = coarse_grain(
+                t_sea_center_off, obs_sea_center_off["Iz_sea"], window=coarse_window
+            )
+            slope_off_sea_center = iz_slope_from_coarse(
+                t_c_off_sea_center, Iz_c_off_sea_center
+            )
+            I_z_slope_off_sea_center = slope_off_sea_center["I_z_slope"]
+            R_off_sea_center = slope_off_sea_center["R_value"]
+
+            # Normalized contrast metrics
+            contrast_rare_center = _safe_normalized_difference(
+                I_z_slope_on_center - I_z_slope_off_center,
+                I_z_slope_off_center,
+            )
+            contrast_sea_center = _safe_normalized_difference(
+                I_z_slope_on_center - I_z_slope_off_sea_center,
+                I_z_slope_off_sea_center,
             )
 
-            # Helper to format T for labels
-            def fmt_T(fit: Optional[Dict[str, float]]) -> str:
-                if fit is None or fit.get("T", None) is None:
-                    return "NA"
-                return f"{fit['T']:.3g}"
+            # -------- Save metrics for this detuning --------
+            metrics = {
+                "delta_Hz": float(delta_Hz),
+                "f_rf_sea_Hz": float(f_rf_sea),
+                # Rare-at-center geometry
+                "I_z_slope_off_center": float(I_z_slope_off_center),
+                "R_off_center": float(R_off_center),
+                "I_z_slope_on_center": float(I_z_slope_on_center),
+                "R_on_center": float(R_on_center),
+                "contrast_rare_center": float(contrast_rare_center),
+                # Sea-as-center control geometry (sea-center)
+                "I_z_slope_off_sea_center": float(I_z_slope_off_sea_center),
+                "R_off_sea_center": float(R_off_sea_center),
+                "contrast_sea_center": float(contrast_sea_center),
+            }
+            _json_dump(os.path.join(det_dir, "metrics.json"), metrics)
+            summary["sweep_results"].append(metrics)
 
             # ------------------------------------------------------------------
-            # Plot 1: ⟨I^z_sea⟩ (rare OFF vs ON) - full resolution
+            # Plot 1: ⟨I^z_sea⟩ (rare OFF vs ON) - full resolution, rare-at-center
             # ------------------------------------------------------------------
             fig1, ax1 = plt.subplots()
-            ax1.plot(t_off, obs_off["Iz_sea"],
-                     label=r"$\langle I^z_{\mathrm{sea}}\rangle$, rare OFF")
-            ax1.plot(t_on,  obs_on["Iz_sea"],
-                     label=r"$\langle I^z_{\mathrm{sea}}\rangle$, rare ON")
+            ax1.plot(
+                t_center_off,
+                obs_center_off["Iz_sea"],
+                label=r"$\langle I^z_{\mathrm{sea}}\rangle$, rare OFF (center)",
+            )
+            ax1.plot(
+                t_center_on,
+                obs_center_on["Iz_sea"],
+                label=r"$\langle I^z_{\mathrm{sea}}\rangle$, rare ON (center)",
+            )
 
             ax1.set_xlabel("Time (s)")
             ax1.set_ylabel(r"$\langle I^z_{\mathrm{sea}}\rangle$")
-            ax1.set_title(f"δ_A = {delta_Hz:+.1f} Hz")
+            ax1.set_title(f"δ_A = {delta_Hz:+.1f} Hz (rare at center)")
             ax1.legend()
             fig1.tight_layout()
-            fig1_path = os.path.join(det_dir, "Iz_sea_off_on.png")
+            fig1_path = os.path.join(det_dir, "Iz_sea_off_on_center.png")
             fig1.savefig(fig1_path, dpi=300)
             pdf.savefig(fig1)
             plt.close(fig1)
 
+            # Helper: plot a slope segment
+            def _plot_slope_segment(ax, slope_info: Dict[str, float], style: str, label: str):
+                if np.isnan(slope_info["I_z_slope"]):
+                    return
+                ax.plot(
+                    [slope_info["t_start"], slope_info["t_end"]],
+                    [slope_info["I_z_start"], slope_info["I_z_end"]],
+                    style,
+                    linewidth=2.0,
+                    markersize=6,
+                    label=label,
+                )
+
+            # Helper: annotate slope value at the midpoint of the segment
+            def _annotate_slope_text(
+                ax,
+                slope_info: Dict[str, float],
+                slope_value: float,
+                dy: float,
+                offset_sign: float,
+                text_label: Optional[str] = None,
+            ):
+                if np.isnan(slope_value) or np.isnan(slope_info["t_start"]):
+                    return
+                t_mid = 0.5 * (slope_info["t_start"] + slope_info["t_end"])
+                iz_mid = 0.5 * (slope_info["I_z_start"] + slope_info["I_z_end"])
+                iz_mid += offset_sign * 0.03 * dy
+                label = text_label or f"{slope_value:+.2e}"
+                ax.text(
+                    t_mid,
+                    iz_mid,
+                    label,
+                    fontsize=6,
+                    ha="center",
+                    va="bottom",
+                    family="monospace",
+                    bbox=dict(boxstyle="round", alpha=0.2, linewidth=0),
+                )
+
             # ------------------------------------------------------------------
-            # Plot 2: ⟨I^z_sea⟩ (OFF/ON) with T-fit overlays, using envelope
+            # Plot 2: Coarse-grained ⟨I^z_sea⟩ (rare-at-center only) + slope
             # ------------------------------------------------------------------
             fig2, ax2 = plt.subplots()
 
-            # Coarse-grain to show the envelope clearly
-            t_off_c, Iz_off_c = coarse_grain(t_off, obs_off["Iz_sea"], window=50)
-            t_on_c,  Iz_on_c  = coarse_grain(t_on,  obs_on["Iz_sea"],  window=50)
-
+            # Coarse envelopes (rare-at-center)
             ax2.plot(
-                t_off_c,
-                Iz_off_c,
+                t_c_off_center,
+                Iz_c_off_center,
                 "o-",
                 markersize=3,
-                label=r"$\langle I^z_{\mathrm{sea}}\rangle$, rare OFF (envelope)",
+                label=r"OFF, rare center (envelope)",
             )
             ax2.plot(
-                t_on_c,
-                Iz_on_c,
+                t_c_on_center,
+                Iz_c_on_center,
                 "o--",
                 markersize=3,
-                label=r"$\langle I^z_{\mathrm{sea}}\rangle$, rare ON (envelope)",
+                label=r"ON, rare center (envelope)",
             )
 
-            # Overlay fits (computed from full-resolution data)
-            if fit_Iz_sea_off is not None:
-                f = fit_Iz_sea_off
-                y_model = f["C"] + f["A"] * np.exp(-t_off / f["T"])
-                ax2.plot(
-                    t_off,
-                    y_model,
-                    "-",
-                    linewidth=1.5,
-                    label=f"Fit OFF (T ≈ {fmt_T(f)} s)",
-                )
-            if fit_Iz_sea_on is not None:
-                f = fit_Iz_sea_on
-                y_model = f["C"] + f["A"] * np.exp(-t_on / f["T"])
-                ax2.plot(
-                    t_on,
-                    y_model,
-                    "--",
-                    linewidth=1.5,
-                    label=f"Fit ON (T ≈ {fmt_T(f)} s)",
-                )
+            # Slope segments
+            _plot_slope_segment(
+                ax2,
+                slope_off_center,
+                "s-",
+                r"OFF slope, rare center",
+            )
+            _plot_slope_segment(
+                ax2,
+                slope_on_center,
+                "s--",
+                r"ON slope, rare center",
+            )
 
             ax2.set_xlabel("Time (s)")
             ax2.set_ylabel(r"$\langle I^z_{\mathrm{sea}}\rangle$")
-            ax2.set_title(f"δ_A = {delta_Hz:+.1f} Hz (pseudo $T_1$ envelope)")
+            ax2.set_title(
+                "δ_A = "
+                f"{delta_Hz:+.1f} Hz (coarse envelopes, rare at center)"
+            )
 
             # Zoom y-limits to the envelope range for clarity
-            y_min = min(Iz_off_c.min(), Iz_on_c.min())
-            y_max = max(Iz_off_c.max(), Iz_on_c.max())
-            if y_max > y_min:
-                pad = 0.05 * (y_max - y_min)
-                ax2.set_ylim(y_min - pad, y_max + pad)
+            all_env_center = np.concatenate([Iz_c_off_center, Iz_c_on_center])
+            y_min_c = float(np.min(all_env_center))
+            y_max_c = float(np.max(all_env_center))
+            if y_max_c > y_min_c:
+                pad_c = 0.05 * (y_max_c - y_min_c)
+                ax2.set_ylim(y_min_c - pad_c, y_max_c + pad_c)
+            dy_c = max(1e-8, y_max_c - y_min_c)
 
-            ax2.legend(fontsize=8)
+            # Annotate slopes along their lines
+            _annotate_slope_text(
+                ax2,
+                slope_off_center,
+                I_z_slope_off_center,
+                dy_c,
+                offset_sign=-1.0,
+                text_label=f"OFF slope = {I_z_slope_off_center:+.2e}",
+            )
+            _annotate_slope_text(
+                ax2,
+                slope_on_center,
+                I_z_slope_on_center,
+                dy_c,
+                offset_sign=+1.0,
+                text_label=f"ON slope = {I_z_slope_on_center:+.2e}",
+            )
+
+            # Annotate contrast and R values
+            metrics_text_center = (
+                f"I_z_slope_off(center)   = {I_z_slope_off_center:+.3e}\n"
+                f"R_off(center)           = {R_off_center:+.3f}\n"
+                f"I_z_slope_on(center)    = {I_z_slope_on_center:+.3e}\n"
+                f"R_on(center)            = {R_on_center:+.3f}\n"
+                f"contrast_rare_center    = {contrast_rare_center:+.3e}"
+            )
+            ax2.text(
+                0.02,
+                0.98,
+                metrics_text_center,
+                transform=ax2.transAxes,
+                va="top",
+                fontsize=7,
+                family="monospace",
+                bbox=dict(boxstyle="round", alpha=0.08),
+            )
+
+            ax2.legend(fontsize=7, loc="best")
             fig2.tight_layout()
-            fig2_path = os.path.join(det_dir, "Iz_sea_with_fits.png")
+            fig2_path = os.path.join(det_dir, "Iz_sea_detection_envelopes_center.png")
             fig2.savefig(fig2_path, dpi=300)
             pdf.savefig(fig2)
             plt.close(fig2)
 
             # ------------------------------------------------------------------
-            # Plot 3: ⟨I^x_sea⟩ and ⟨I^y_sea⟩ (rare OFF)
+            # Plot 3: Coarse-grained ⟨I^z_sea⟩ (sea-center control) + slope
             # ------------------------------------------------------------------
             fig3, ax3 = plt.subplots()
-            ax3.plot(t_off, obs_off["Ix_sea"],
-                     label=r"$\langle I^x_{\mathrm{sea}}\rangle$")
-            ax3.plot(t_off, obs_off["Iy_sea"],
-                     label=r"$\langle I^y_{\mathrm{sea}}\rangle$")
+
+            ax3.plot(
+                t_c_off_sea_center,
+                Iz_c_off_sea_center,
+                "x-",
+                markersize=3,
+                label=r"Sea-center control (envelope)",
+            )
+
+            _plot_slope_segment(
+                ax3,
+                slope_off_sea_center,
+                "D-",
+                r"Slope, sea-center control",
+            )
 
             ax3.set_xlabel("Time (s)")
-            ax3.set_ylabel(r"$\langle I^{x,y}_{\mathrm{sea}}\rangle$")
-            ax3.set_title(f"δ_A = {delta_Hz:+.1f} Hz (rare drive OFF)")
-            ax3.legend(fontsize=8)
+            ax3.set_ylabel(r"$\langle I^z_{\mathrm{sea}}\rangle$")
+            ax3.set_title(
+                "δ_A = "
+                f"{delta_Hz:+.1f} Hz (coarse envelope, sea-center control)"
+            )
+
+            all_env_shell = Iz_c_off_sea_center
+            y_min_s = float(np.min(all_env_shell))
+            y_max_s = float(np.max(all_env_shell))
+            if y_max_s > y_min_s:
+                pad_s = 0.05 * (y_max_s - y_min_s)
+                ax3.set_ylim(y_min_s - pad_s, y_max_s + pad_s)
+            dy_s = max(1e-8, y_max_s - y_min_s)
+
+            _annotate_slope_text(
+                ax3,
+                slope_off_sea_center,
+                I_z_slope_off_sea_center,
+                dy_s,
+                offset_sign=+1.0,
+                text_label=f"Slope = {I_z_slope_off_sea_center:+.2e}",
+            )
+
+            metrics_text_shell = (
+                f"I_z_slope_sea-center    = {I_z_slope_off_sea_center:+.3e}\n"
+                f"R_sea-center            = {R_off_sea_center:+.3f}\n"
+                f"contrast_sea_center     = {contrast_sea_center:+.3e}"
+            )
+            ax3.text(
+                0.02,
+                0.98,
+                metrics_text_shell,
+                transform=ax3.transAxes,
+                va="top",
+                fontsize=7,
+                family="monospace",
+                bbox=dict(boxstyle="round", alpha=0.08),
+            )
+
+            ax3.legend(fontsize=7, loc="best")
             fig3.tight_layout()
-            fig3_path = os.path.join(det_dir, "Ix_Iy_sea_off.png")
+            fig3_path = os.path.join(det_dir, "Iz_sea_detection_envelopes_sea_center.png")
             fig3.savefig(fig3_path, dpi=300)
             pdf.savefig(fig3)
             plt.close(fig3)
 
             # ------------------------------------------------------------------
-            # Plot 4: State norm ‖ψ(t)‖ (rare OFF vs ON)
+            # Plot 4: State norm ‖ψ(t)‖ (rare OFF vs ON, rare-at-center)
             # ------------------------------------------------------------------
             figN, axN = plt.subplots()
-            axN.plot(t_off, obs_off["state_norm"],
-                     label=r"$\|\psi(t)\|$, rare OFF")
-            axN.plot(t_on, obs_on["state_norm"],
-                     label=r"$\|\psi(t)\|$, rare ON")
+            axN.plot(
+                t_center_off,
+                obs_center_off["state_norm"],
+                label=r"$\|\psi(t)\|$, rare OFF (center)",
+            )
+            axN.plot(
+                t_center_on,
+                obs_center_on["state_norm"],
+                label=r"$\|\psi(t)\|$, rare ON (center)",
+            )
 
             axN.set_xlabel("Time (s)")
             axN.set_ylabel(r"State norm $\|\psi\|$")
-            axN.set_title(f"δ_A = {delta_Hz:+.1f} Hz (state norm)")
+            axN.set_title(
+                f"δ_A = {delta_Hz:+.1f} Hz (state norm, rare at center)"
+            )
             axN.legend()
             figN.tight_layout()
-            figN_path = os.path.join(det_dir, "state_norm_off_on.png")
+            figN_path = os.path.join(det_dir, "state_norm_off_on_center.png")
             figN.savefig(figN_path, dpi=300)
             pdf.savefig(figN)
             plt.close(figN)
 
             print(
                 f"[{idx + 1}/{n_det}] Finished δ_A = {delta_Hz:+.1f} Hz, "
-                f"in {dt_total:.2f} s, "
                 f"results in {det_dir}",
                 flush=True,
             )
 
-        # -------- PDF: T-fit summary page --------
+        # -------- PDF: contrast-metric summary page (as a table) --------
         fig, ax = plt.subplots(figsize=(8.27, 11.69))
         ax.axis("off")
-        lines = []
-        lines.append("T-like decay fits from ⟨I^z_sea⟩ traces")
-        lines.append("")
-        header = "delta_Hz      T_Iz_sea_off       T_Iz_sea_on"
-        lines.append(header)
-        lines.append("-" * len(header))
 
-        def _fmt_T_line(fit: Optional[Dict[str, float]]) -> str:
-            if fit is None or fit.get("T", None) is None:
-                return "NA".ljust(18)
-            return f"{fit['T']:.3g}".ljust(18)
+        col_labels = [
+            "δ_A (Hz)",
+            "slope_off(center)",
+            "R_off(center)",
+            "slope_on(center)",
+            "R_on(center)",
+            "contrast_rare_center",
+            "slope_sea-center",
+            "R_sea-center",
+            "contrast_sea_center",
+        ]
 
+        table_vals: List[List[str]] = []
         for row in summary["sweep_results"]:
-            delta = row["delta_Hz"]
-            l = f"{delta:+9.1f}  "
-            l += _fmt_T_line(row["fit_Iz_sea_off"])
-            l += _fmt_T_line(row["fit_Iz_sea_on"])
-            lines.append(l)
+            table_vals.append(
+                [
+                    f"{row['delta_Hz']:+.1f}",
+                    f"{row['I_z_slope_off_center']:+.3e}",
+                    f"{row['R_off_center']:+.3f}",
+                    f"{row['I_z_slope_on_center']:+.3e}",
+                    f"{row['R_on_center']:+.3f}",
+                    f"{row['contrast_rare_center']:+.3e}",
+                    f"{row['I_z_slope_off_sea_center']:+.3e}",
+                    f"{row['R_off_sea_center']:+.3f}",
+                    f"{row['contrast_sea_center']:+.3e}",
+                ]
+            )
 
-        ax.text(
-            0.02,
-            0.98,
-            "\n".join(lines),
-            transform=ax.transAxes,
-            va="top",
-            family="monospace",
+        table = ax.table(
+            cellText=table_vals,
+            colLabels=col_labels,
+            loc="center",
         )
+        table.auto_set_font_size(False)
+        table.set_fontsize(6)
+        table.scale(1.0, 1.3)
+
+        ax.set_title(
+            "Contrast metrics from coarse-grained ⟨I^z_sea⟩ slopes",
+            pad=20,
+        )
+
         pdf.savefig(fig)
         plt.close(fig)
 
@@ -655,9 +950,11 @@ def run_sweep_sea_detuning(
     return base_dir
 
 
-def f1R_for_resonance(f1A_Hz: float,
-                      deltaA_Hz: float,
-                      deltaR_Hz: float = 0.0) -> float:
+def f1R_for_resonance(
+    f1A_Hz: float,
+    deltaA_Hz: float,
+    deltaR_Hz: float = 0.0,
+) -> float:
     """
     Compute f1R (Hz) such that the sea and rare effective fields match:
 
@@ -693,8 +990,8 @@ if __name__ == "__main__":
     gamma71 = 8.1812e7    # 71Ga
     # p69, p71 = 0.60108, 0.39892  # natural abundances (approx)
 
-    gamma_sea = gamma71  # p69 * gamma69 + p71 * gamma71   # effective Ga, ~7.13e7
-    gamma_rare = 6.976e7                        # 27Al
+    gamma_sea = gamma71  # effective Ga
+    gamma_rare = 6.976e7  # 27Al
 
     # --- Static field ---
     B0_common = 3.0  # Tesla
@@ -703,20 +1000,20 @@ if __name__ == "__main__":
     f_Az = gamma_sea * B0_common / (2 * np.pi)
 
     # --- Rabi frequencies (Hz) ---
-    f1A = 2500   # sea Rabi
-    target_sea_detuning = 1250
+    f1A = 5000   # sea Rabi
+    target_sea_detuning = 5000
     # rare Rabi freq determined to make it match resonance condition with target sea detuning
 
     # --- Time grid (extended to see the envelope clearly) ---
-    t_final = 30 # in seconds
+    t_final = 3  # in seconds
     steps = 20000
 
     # --- RF phases ---
     phi_sea = (np.pi / 2.0) * 1.0
     phi_rare = (np.pi / 2.0) * 1.0
 
-    # --- Detuning sweep (δ_A in Hz): -10 kHz ... +10 kHz ---
-    sea_detunings_Hz = np.linspace(0, 5000, 21)
+    # --- Detuning sweep (δ_A in Hz) ---
+    sea_detunings_Hz = np.linspace(5000, 10000, 3)
 
     run_sweep_sea_detuning(
         f_Az=f_Az,
@@ -736,4 +1033,5 @@ if __name__ == "__main__":
         solver_rtol=1e-9,
         solver_nsteps=10_000_000,
         solver_max_step=1e-5,
+        coarse_window=100,
     )

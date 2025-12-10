@@ -376,6 +376,7 @@ class DipolarRareParams:
     init_rare_level: int = 3
 
     is_spin_three_half: bool = True
+    is_center_rare: bool = True
 
     # Solver settings
     solver_atol: float | None = None
@@ -483,7 +484,11 @@ def build_hamiltonian_rare(params: DipolarRareParams) -> Tuple[qt.Qobj, Dict[str
     n_sea = params.n_sea
     n_total = n_sea + 1
     idx_rare = n_sea
-    dims = dims_with_rare(n_sea, params.is_spin_three_half)
+    dims = dims_with_rare(n_sea, params.is_spin_three_half if not params.is_center_rare else False)
+
+    if not params.is_center_rare:
+        n_sea = n_total
+
 
     # ---- Derived frequencies and detunings ----
     freqs = get_derived_frequencies(params)
@@ -503,7 +508,7 @@ def build_hamiltonian_rare(params: DipolarRareParams) -> Tuple[qt.Qobj, Dict[str
         Iz_tot_sea = total_op_sea(_Iz, n_sea, dims)
         H_detune += delta_sea * Iz_tot_sea
 
-    if params.drive_rare and delta_rare != 0.0:
+    if params.is_center_rare and params.drive_rare and delta_rare != 0.0:
         Iz_R = embed_site_op_hetero(rare_operator_z, idx_rare, dims)
         H_detune += delta_rare * Iz_R
 
@@ -516,7 +521,7 @@ def build_hamiltonian_rare(params: DipolarRareParams) -> Tuple[qt.Qobj, Dict[str
     else:
         H_drive_sea = 0
 
-    if params.drive_rare and omega1_rare != 0.0:
+    if params.is_center_rare and params.drive_rare and omega1_rare != 0.0:
         Ix_R = embed_site_op_hetero(rare_operator_x, idx_rare, dims)
         Iy_R = embed_site_op_hetero(rare_operator_y, idx_rare, dims)
         H_drive_rare = omega1_rare * (
@@ -527,7 +532,7 @@ def build_hamiltonian_rare(params: DipolarRareParams) -> Tuple[qt.Qobj, Dict[str
 
     # ---- Dipolar couplings from shell geometry ----
     positions = shell_positions_with_rare_center(
-        n_sea=n_sea,
+        n_sea=n_sea if params.is_center_rare else n_sea - 1,
         radius=params.shell_scale,
     )
     if positions.shape != (n_total, 3):
@@ -537,7 +542,7 @@ def build_hamiltonian_rare(params: DipolarRareParams) -> Tuple[qt.Qobj, Dict[str
         positions,
         params.dipolar_scale,
         params.gamma_sea,
-        params.gamma_rare,
+        params.gamma_rare if params.is_center_rare else params.gamma_sea,
     )
 
     # Build dipolar Hamiltonian:
@@ -592,14 +597,16 @@ def initial_state_rare(params: DipolarRareParams) -> qt.Qobj:
       - rare spin: currently prepared in an |+x> eigenstate of Jx
     """
     n_sea = params.n_sea
-    dims = dims_with_rare(n_sea, params.is_spin_three_half)
-    dim_rare = dims[-1]
-
     sea_ket = basis_sea(axis="z", sign=params.init_x_sign)
 
-    rare_ket = basis_rare(axis="z", sign=-params.init_x_sign, is_spin_three_half=params.is_spin_three_half)
+    if params.is_center_rare:
+        rare_ket = basis_rare(axis="z", sign=-params.init_x_sign, is_spin_three_half=params.is_spin_three_half)
+        return qt.tensor([sea_ket] * n_sea + [rare_ket])
+    else:
+        n_total = n_sea + 1
+        return qt.tensor([sea_ket] * n_total)
 
-    return qt.tensor([sea_ket] * n_sea + [rare_ket])
+
 
 
 def simulate_rare(params: DipolarRareParams) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
