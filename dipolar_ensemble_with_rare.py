@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import combinations
-from typing import Dict, Mapping, Tuple
+from typing import Dict, Tuple
 
 import numpy as np
 import qutip as qt
-import matplotlib.pyplot as plt
 
 
 # ---------------------------------------------------------------------------
@@ -28,7 +27,8 @@ _J = qt.qeye(4)
 
 def dims_with_rare(n_sea: int, is_spin_three_half: bool = False) -> list[int]:
     """
-    Local dimensions for n_sea sea spins and one rare spin.
+    Local dimensions for n_sea sea spins and one rare spin. If the rare spin is being
+    modeled as a sea spin, is_spin_three_half can be set to True to produce the correct dimensions.
     Indices: 0..n_sea-1 are sea (dim=2), index n_sea is rare (dim=4).
     """
     return [2] * n_sea + ([4] if is_spin_three_half else [2])
@@ -68,7 +68,6 @@ def basis_sea(axis: str = "x", sign: int = +1) -> qt.Qobj:
         ket = (up + sign * dn).unit()
         return ket
     elif axis == "z":
-        # I_z eigenstates are just |↑⟩ and |↓⟩ in the computational basis
         idx = 0 if sign >= 0 else 1
         return qt.basis(2, idx)
     else:
@@ -113,7 +112,7 @@ def _platonic_vertices(n_sea: int) -> np.ndarray:
     Supported n_sea: 4 (tetra), 6 (octa), 8 (cube), 12 (icosa), 20 (dodeca).
     """
     phi = (1.0 + np.sqrt(5.0)) / 2.0  # golden ratio
-    inv_phi = 1.0 / phi               # = phi - 1
+    inv_phi = 1.0 / phi
 
     if n_sea == 4:
         # Regular tetrahedron
@@ -593,8 +592,8 @@ def initial_state_rare(params: DipolarRareParams) -> qt.Qobj:
     """
     Product state for sea + rare:
 
-      - sea spins: all in |±x> eigenstate (sign set by init_x_sign)
-      - rare spin: currently prepared in an |+x> eigenstate of Jx
+      - sea spins: all in |-z> eigenstate
+      - rare spin: currently prepared in an |+z> eigenstate of Jz
     """
     n_sea = params.n_sea
     sea_ket = basis_sea(axis="z", sign=params.init_x_sign)
