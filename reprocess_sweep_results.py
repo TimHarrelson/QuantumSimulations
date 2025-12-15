@@ -1,7 +1,8 @@
+#!/usr/bin/env python3
 """
-Reprocess an existing sea-detuning sweep WITHOUT re-running simulations.
+Reprocess one or more existing sea-detuning sweeps WITHOUT re-running simulations.
 
-Assumes the sweep directory was produced by the current version of
+Assumes each sweep directory was produced by the current version of
 `sweep_sea_detuning.py`, which, for each detuning, saves:
 
   time_and_obs_center_off.npz
@@ -36,27 +37,31 @@ and a top-level summary.json of the form:
 
 This script:
 
-  * Lets you pick a sweep directory via a folder picker (starting in 'results/').
-  * Reloads saved time series (center_off/on, shell_off).
-  * Re-applies coarse-graining with a user-selected window size.
-  * Recomputes I_z_slope, t-values, R values, contrast_rare_center, and
-    contrast_sea_center using the SAME coarse_grain, iz_slope_from_coarse, and
-    contrast_michelson_with_t_gate helpers as the sweep script.
-  * Recomputes ΔΩ, g_eff, and ΔΩ/|g_eff| using:
-        f1A_Hz, f1R_Hz, and rms_b_AR_Hz from global_params.
-  * Writes a new PDF report called
+  * Lets you pick a ROOT directory via a folder picker (starting in 'results/').
+  * Finds all subdirectories under that root that contain a summary.json and
+    treats each as a separate detuning sweep to reprocess.
+  * For each sweep:
+      - Reloads saved time series (center_off/on, shell_off).
+      - Re-applies coarse-graining with a user-selected window size.
+      - Recomputes I_z_slope, t-values, R values, contrast_rare_center, and
+        contrast_sea_center using the SAME helpers as the sweep script.
+      - Computes ΔΩ, g_eff, and ΔΩ/|g_eff| (η) from global_params.
+      - Computes the signed and absolute slope difference for the rare-at-center:
+            delta_I_z_slope_center   = I_z_slope_on_center - I_z_slope_off_center
+            abs_delta_I_z_slope_center = |delta_I_z_slope_center|
+      - Saves a new PDF report with:
+            * global parameter page
+            * per-detuning plots (Iz traces, envelopes, control, norms)
+            * summary table of slopes / t-values / contrasts
+            * an ADDITIONAL table of (δ_A, |Δslope_center|, contrast_rare_center)
+            * contrast_rare_center vs η
+            * abs_delta_I_z_slope_center vs η
+      - Writes a JSON file:
 
-        sea_detuning_report_reprocessed[_winNN].pdf
+            summary_reprocessed_winNN.json
 
-    in the chosen sweep folder, with the same 4-plot layout as the sweep
-    (rare center OFF/ON, envelopes + slopes, sea-center control envelope, norm),
-    plus a final contrast_rare_center vs ΔΩ/|g_eff| page.
-  * Writes a JSON file
+        with the recomputed metrics (including the new slope-difference fields).
 
-        summary_reprocessed_winNN.json
-
-    with the recomputed metrics (no detection_metric), including ΔΩ, g_eff,
-    ΔΩ/|g_eff|, and t-values for the slopes.
 """
 
 from __future__ import annotations
@@ -66,6 +71,11 @@ import os
 from typing import Any, Dict, List
 
 import numpy as np
+
+# Use a non-GUI backend so Tk / TkAgg never get involved
+import matplotlib
+matplotlib.use("Agg")
+
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 
@@ -85,7 +95,7 @@ from sweep_sea_detuning import (
 def reprocess_sweep(base_dir: str, window: int = 50) -> str:
     """
     Reprocess an existing sweep in base_dir and create a new PDF with
-    updated coarse-graining and contrast metrics.
+    updated coarse-graining and contrast metrics, plus slope-difference metrics.
 
     Parameters
     ----------
@@ -243,8 +253,8 @@ def reprocess_sweep(base_dir: str, window: int = 50) -> str:
             if np.isnan(slope_info["I_z_slope"]):
                 return
             ax.plot(
-                [slope_info["t_start"], slope_info["t_end"]],
-                [slope_info["I_z_start"], slope_info["I_z_end"]],
+                [slope_info["t_start"], slope_info["t_end"]],  # type: ignore[index]
+                [slope_info["I_z_start"], slope_info["I_z_end"]],  # type: ignore[index]
                 style,
                 linewidth=2.0,
                 markersize=6,
@@ -259,10 +269,10 @@ def reprocess_sweep(base_dir: str, window: int = 50) -> str:
             offset_sign: float,
             text_label: str,
         ) -> None:
-            if np.isnan(slope_value) or np.isnan(slope_info["t_start"]):
+            if np.isnan(slope_value) or np.isnan(slope_info["t_start"]):  # type: ignore[index]
                 return
-            t_mid = 0.5 * (slope_info["t_start"] + slope_info["t_end"])
-            iz_mid = 0.5 * (slope_info["I_z_start"] + slope_info["I_z_end"])
+            t_mid = 0.5 * (slope_info["t_start"] + slope_info["t_end"])  # type: ignore[index]
+            iz_mid = 0.5 * (slope_info["I_z_start"] + slope_info["I_z_end"])  # type: ignore[index]
             iz_mid += offset_sign * 0.03 * dy
             ax.text(
                 t_mid,
@@ -348,6 +358,10 @@ def reprocess_sweep(base_dir: str, window: int = 50) -> str:
             t_off_center = slope_off_center["t_value"]
             t_on_center = slope_on_center["t_value"]
 
+            # Raw slope difference metrics (center / rare-case)
+            delta_I_z_slope_center = I_z_slope_on_center - I_z_slope_off_center
+            abs_delta_I_z_slope_center = abs(delta_I_z_slope_center)
+
             # Sea-as-center control
             t_c_off_sea_center, Iz_c_off_sea_center = coarse_grain(
                 t_sea_center_off, Iz_sea_center_off, window=window
@@ -397,7 +411,7 @@ def reprocess_sweep(base_dir: str, window: int = 50) -> str:
                 if g_eff_Hz != 0.0 and not np.isnan(g_eff_Hz):
                     DeltaOmega_over_geff = float(DeltaOmega_Hz / abs(g_eff_Hz))
 
-            # Store recomputed metrics
+            # Store recomputed metrics (including new slope-difference fields)
             new_metrics = {
                 "delta_Hz": float(delta_hz),
                 "I_z_slope_off_center": float(I_z_slope_off_center),
@@ -406,6 +420,8 @@ def reprocess_sweep(base_dir: str, window: int = 50) -> str:
                 "I_z_slope_on_center": float(I_z_slope_on_center),
                 "R_on_center": float(R_on_center),
                 "t_on_center": float(t_on_center),
+                "delta_I_z_slope_center": float(delta_I_z_slope_center),
+                "abs_delta_I_z_slope_center": float(abs_delta_I_z_slope_center),
                 "contrast_rare_center": float(contrast_rare_center),
                 "I_z_slope_off_sea_center": float(I_z_slope_off_sea_center),
                 "R_off_sea_center": float(R_off_sea_center),
@@ -505,6 +521,8 @@ def reprocess_sweep(base_dir: str, window: int = 50) -> str:
                 f"t_off(center)           = {t_off_center:+.3f}\n"
                 f"I_z_slope_on(center)    = {I_z_slope_on_center:+.3e}\n"
                 f"t_on(center)            = {t_on_center:+.3f}\n"
+                f"Δslope_center           = {delta_I_z_slope_center:+.3e}\n"
+                f"|Δslope_center|         = {abs_delta_I_z_slope_center:.3e}\n"
                 f"contrast_rare_center    = {contrast_rare_center:+.3e}\n"
                 f"ΔΩ/|g_eff|              = {DeltaOmega_over_geff:+.3e}"
             )
@@ -615,7 +633,7 @@ def reprocess_sweep(base_dir: str, window: int = 50) -> str:
                 pdf.savefig(figN)
                 plt.close(figN)
 
-        # --- Summary table page ---
+        # --- Summary table page (full metrics) ---
         fig, ax = plt.subplots(figsize=(8.27, 11.69))
         ax.axis("off")
 
@@ -625,6 +643,8 @@ def reprocess_sweep(base_dir: str, window: int = 50) -> str:
             "t_off(center)",
             "slope_on(center)",
             "t_on(center)",
+            "Δslope(center)",
+            "|Δslope(center)|",
             "contrast_rare_center",
             "slope_sea-center",
             "t_sea-center",
@@ -640,6 +660,8 @@ def reprocess_sweep(base_dir: str, window: int = 50) -> str:
                     f"{row['t_off_center']:+.3f}",
                     f"{row['I_z_slope_on_center']:+.3e}",
                     f"{row['t_on_center']:+.3f}",
+                    f"{row['delta_I_z_slope_center']:+.3e}",
+                    f"{row['abs_delta_I_z_slope_center']:.3e}",
                     f"{row['contrast_rare_center']:+.3e}",
                     f"{row['I_z_slope_off_sea_center']:+.3e}",
                     f"{row['t_off_sea_center']:+.3f}",
@@ -657,14 +679,51 @@ def reprocess_sweep(base_dir: str, window: int = 50) -> str:
         table.scale(1.0, 1.3)
 
         ax.set_title(
-            "Reprocessed contrast metrics from coarse-grained ⟨I^z_sea⟩ slopes",
+            "Reprocessed metrics from coarse-grained ⟨I^z_sea⟩ slopes",
             pad=20,
         )
 
         pdf.savefig(fig)
         plt.close(fig)
 
-        # --- Final plot: contrast_rare_center vs ΔΩ/|g_eff| ---
+        # --- Addendum table: δ_A, |Δslope_center|, contrast_rare_center ---
+        fig_add, ax_add = plt.subplots(figsize=(8.27, 11.69))
+        ax_add.axis("off")
+
+        col_labels_add = [
+            "δ_A (Hz)",
+            "|Δslope_center|",
+            "contrast_rare_center",
+        ]
+
+        table_vals_add: List[List[str]] = []
+        for row in new_sweep_results:
+            table_vals_add.append(
+                [
+                    f"{row['delta_Hz']:+.1f}",
+                    f"{row['abs_delta_I_z_slope_center']:.3e}",
+                    f"{row['contrast_rare_center']:+.3e}",
+                ]
+            )
+
+        table_add = ax_add.table(
+            cellText=table_vals_add,
+            colLabels=col_labels_add,
+            loc="center",
+        )
+        table_add.auto_set_font_size(False)
+        table_add.set_fontsize(6)
+        table_add.scale(1.0, 1.3)
+
+        ax_add.set_title(
+            "Addendum: swept δ_A, |Δslope_center|, and contrast_rare_center",
+            pad=20,
+        )
+
+        pdf.savefig(fig_add)
+        plt.close(fig_add)
+
+        # --- Final plot 1: contrast_rare_center vs ΔΩ/|g_eff| ---
         x_vals = np.array(
             [row.get("DeltaOmega_over_geff", np.nan) for row in new_sweep_results],
             dtype=float,
@@ -675,13 +734,13 @@ def reprocess_sweep(base_dir: str, window: int = 50) -> str:
         )
 
         mask = ~np.isnan(x_vals) & ~np.isnan(y_vals)
-        x_vals = x_vals[mask]
-        y_vals = y_vals[mask]
+        x_c = x_vals[mask]
+        y_c = y_vals[mask]
 
-        if x_vals.size > 0:
-            order = np.argsort(x_vals)
-            x_sorted = x_vals[order]
-            y_sorted = y_vals[order]
+        if x_c.size > 0:
+            order = np.argsort(x_c)
+            x_sorted = x_c[order]
+            y_sorted = y_c[order]
 
             figc, axc = plt.subplots(figsize=(6, 4))
             axc.plot(x_sorted, y_sorted, "o-", markersize=4)
@@ -696,6 +755,35 @@ def reprocess_sweep(base_dir: str, window: int = 50) -> str:
             figc.tight_layout()
             pdf.savefig(figc)
             plt.close(figc)
+
+        # --- Final plot 2: |Δslope_center| vs ΔΩ/|g_eff| ---
+        z_vals = np.array(
+            [row.get("abs_delta_I_z_slope_center", np.nan) for row in new_sweep_results],
+            dtype=float,
+        )
+
+        mask2 = ~np.isnan(x_vals) & ~np.isnan(z_vals)
+        x_s = x_vals[mask2]
+        z_s = z_vals[mask2]
+
+        if x_s.size > 0:
+            order2 = np.argsort(x_s)
+            x_sorted2 = x_s[order2]
+            z_sorted2 = z_s[order2]
+
+            figd, axd = plt.subplots(figsize=(6, 4))
+            axd.plot(x_sorted2, z_sorted2, "o-", markersize=4)
+
+            axd.set_xlabel(r"$\Delta\Omega / |g_{\mathrm{eff}}|$")
+            axd.set_ylabel(r"$| \Delta I^z_{\mathrm{slope,center}} |$")
+            axd.set_title(
+                r"Absolute slope difference vs $\Delta\Omega/|g_{\mathrm{eff}}|$ (reprocessed)"
+            )
+            axd.grid(True, alpha=0.3)
+
+            figd.tight_layout()
+            pdf.savefig(figd)
+            plt.close(figd)
 
     # --- Write reprocessed summary JSON ---
     summary_reprocessed = {
@@ -716,15 +804,16 @@ def reprocess_sweep(base_dir: str, window: int = 50) -> str:
     return new_pdf
 
 
-def _choose_sweep_dir(initial_dir: str = "results") -> str | None:
+def _choose_root_dir(initial_dir: str = "results") -> str | None:
     """
-    Open a folder picker dialog to choose a sweep directory.
+    Open a folder picker dialog to choose a ROOT directory containing
+    one or more sea-detuning sweep folders (each with a summary.json).
     """
     root = tk.Tk()
     root.withdraw()
     folder = filedialog.askdirectory(
         initialdir=os.path.abspath(initial_dir),
-        title="Select sea-detuning sweep directory",
+        title="Select ROOT directory containing sea-detuning sweeps",
     )
     root.destroy()
     if not folder:
@@ -732,9 +821,21 @@ def _choose_sweep_dir(initial_dir: str = "results") -> str | None:
     return folder
 
 
+def _find_sweep_dirs(root_dir: str) -> List[str]:
+    """
+    Find all subdirectories under root_dir that contain a summary.json.
+    Treat each as a separate sweep directory.
+    """
+    sweep_dirs: List[str] = []
+    for dirpath, dirnames, filenames in os.walk(root_dir):
+        if "summary.json" in filenames:
+            sweep_dirs.append(os.path.abspath(dirpath))
+    return sweep_dirs
+
+
 if __name__ == "__main__":
-    sweep_dir = _choose_sweep_dir()
-    if not sweep_dir:
+    root_dir = _choose_root_dir()
+    if not root_dir:
         print("No directory selected. Exiting.")
     else:
         try:
@@ -747,4 +848,13 @@ if __name__ == "__main__":
             print("Invalid window size, using default 50.")
             window = 50
 
-        reprocess_sweep(sweep_dir, window=window)
+        sweep_dirs = _find_sweep_dirs(root_dir)
+        if not sweep_dirs:
+            print(f"No summary.json files found under {root_dir}. Nothing to do.")
+        else:
+            print(f"Found {len(sweep_dirs)} sweep(s) under {root_dir}.")
+            for d in sorted(sweep_dirs):
+                try:
+                    reprocess_sweep(d, window=window)
+                except Exception as exc:  # noqa: BLE001
+                    print(f"Error reprocessing sweep in {d}: {exc}")

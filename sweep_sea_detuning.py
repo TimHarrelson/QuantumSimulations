@@ -1215,7 +1215,7 @@ if __name__ == "__main__":
     f_Az = gamma_sea * B0_common / (2 * np.pi)
 
     # --- Rabi frequencies (Hz) ---
-    f1A = 15_000   # sea Rabi
+    f1A = 50_000   # sea Rabi
     target_sea_detuning = f1A
     # rare Rabi freq determined to make it match resonance condition with target sea detuning
 
@@ -1242,7 +1242,7 @@ if __name__ == "__main__":
         steps=steps,
         phi_sea=phi_sea,
         phi_rare=phi_rare,
-        out_root="results/sweep_f1A_3x_target_detune_long",
+        out_root="results/sweep_f1A_3x_target_detune_extra_long",
         is_spin_three_half=False,
         solver_atol=1e-10,
         solver_rtol=1e-9,
